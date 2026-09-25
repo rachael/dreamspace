@@ -4,11 +4,17 @@
   "private": true,
   "description": "Vibe XR with PICO CLI: a three.js WebXR starter you remix with Claude Code and open in the PICO browser.",
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "node serve/serve.mjs",
     "serve": "node serve/start.mjs",
     "usb": "node serve/start.mjs --usb"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.1",
+    "zod": "^3.25.76"
+  }
 }

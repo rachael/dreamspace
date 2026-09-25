@@ -88,6 +88,10 @@ afaik i dont have any local modal such as qwen/ollama so just gfi and get one if
 lets go, dude
 ```
 
+## Style direction (her words, 2026-09-24)
+"for environment lets make it kind of soothing, cool and with a general scifi + fantasy vibe ... whatever you can do and do well, yk"
+→ Calm twilight palette (deep teal → violet), bioluminescent crystals, floating islands, fireflies, a ringed planet or moons, a soft aurora. Slow motion, nothing jarring. Do fewer things, and do them beautifully, within the headset perf budget.
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
