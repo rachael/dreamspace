@@ -112,6 +112,21 @@ Each provider exports `default { name, available: async () => bool, generate: as
 - `index.html` (integrator): the desktop overlay becomes the Dreamspace title, a text input, a mic button, a brain picker and the "open on phone" hint.
 - `phone/index.html`, `phone/phone.js`, `phone/phone.css`, `phone/manifest.webmanifest`: the iPhone page. A big tap-to-talk button plus a **hands-free toggle**, a live transcript, the chat log, a text box, the guide's replies spoken through `speechSynthesis` (AirPods) and a brain picker. Optional: a small live window into the world (iframe `/?embed=1`, where the viewer hides its overlay). Add-to-home-screen ready. Dark, calm, and matching the theme.
 
+## Vibe mode: voice-code the world (`server/vibe.mjs`, `src/world/creations.js`)
+She wants to "vibe build a WebXR app by voice": say what you want, and Claude writes code that appears live in the world.
+- `POST /api/vibe {text, from}` → `202 {id}`. The server runs the `claude` CLI (subscription) with **cwd = `creations/`**, tools limited to
+  Read/Write/Edit/Glob inside that directory (no Bash, no web, no MCP except world `look_around`), and `--permission-mode acceptEdits`
+  so edits inside cwd are allowed and anything outside is refused. Verify empirically: a write to `../src/main.js` must fail.
+  Keep one persistent session so follow-ups ("make it bigger", "now make them orbit") work.
+- A creation is `creations/<slug>.js`: `export default function create({ THREE, scene, room, world, addUpdate }) { ...; return object3d }`,
+  where `addUpdate(fn(dt,t))` registers an animation. It imports nothing else: three is passed in. `creations/README.md` (owned by vibe) holds the
+  rules Claude follows there: the perf budget, metres, no camera moves, calm sci-fi/fantasy style.
+- After a run, the server validates each changed file (`node --check`, plus `import`/`fetch`/`eval`/`document.cookie`/`localStorage` banned via a simple lint)
+  and broadcasts SSE `creation {slug, url:'/creations/<slug>.js?v=<mtime>', action:'upsert'|'remove'}` plus a `chat` guide line summarising what changed.
+- `src/world/creations.js`: `createCreations({THREE, scene, room})` → `{ load(evt), update(dt,t), list() }`. It dynamic-imports with a cache-bust, disposes the
+  previous version of a slug, and wraps `create`/updates in try/catch so a bad creation shows an error chip instead of killing the scene.
+- `GET /api/creations` lists the current ones on load. Phone and viewer both get a "Vibe" toggle: in vibe mode, utterances go to `/api/vibe` instead of `/api/chat`.
+
 ## Ops and scripts
 - `package.json` scripts: `start` (`node server/app.mjs`), `tunnel` (cloudflared quick tunnel to 8787), `up` (`node scripts/up.mjs`: checks ollama and starts it if needed, starts whisper-server if the model exists, starts the app and the tunnel, prints the public viewer URL + phone URL with the token, and a terminal QR code for the phone URL), `smoke` (`node server/smoke.mjs`).
 - `.gitignore` adds `.env.local`, `.data/`, `models/`, `node_modules/`.
@@ -129,5 +144,6 @@ Each provider exports `default { name, available: async () => bool, generate: as
 | guide-ui | `src/world/guide.js`, `src/ui/panel3d.js` |
 | client-io | `src/net/client.js`, `src/voice/index.js`, `src/xr/teleport.js` |
 | phone | `phone/*` |
+| vibe | `server/vibe.mjs`, `src/world/creations.js`, `creations/README.md` (server-core mounts `/api/vibe`, `/api/creations` by importing `handleVibe(req,res,ctx)` / `listCreations()` from `server/vibe.mjs`) |
 | ops | `package.json`, `scripts/up.mjs`, `.gitignore`, `README.md` |
 | integrator (after the builders) | `src/main.js`, `index.html` |

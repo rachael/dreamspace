@@ -92,6 +92,11 @@ lets go, dude
 "for environment lets make it kind of soothing, cool and with a general scifi + fantasy vibe ... whatever you can do and do well, yk"
 → Calm twilight palette (deep teal → violet), bioluminescent crystals, floating islands, fireflies, a ringed planet or moons, a soft aurora. Slow motion, nothing jarring. Do fewer things, and do them beautifully, within the headset perf budget.
 
+## Vision, next layer (her idea, 2026-09-24)
+"maybe we can build a vibe coding app where I can literally vibe build a webxr app with you with meshy using voice coding to just vibe modify things or add assets"
+→ Vibe mode (see docs/CONTRACT.md): voice → Claude Code writes sandboxed three.js creations → they hot-load in the world.
+Meshy: she's getting a free Pro month **when Meshy reaches out, not before**. Don't sign up; the `meshy` asset provider waits for `MESHY_API_KEY`.
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
