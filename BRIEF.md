@@ -37,6 +37,18 @@ Started 2026-09-24, at the PICO "Claude for Spatial Computing" workshop (Homebre
 - **A metaprompt, then a fanned-out team.** One description of the app, many agents building it in parallel.
 - **Save everything in one brief** (this file), so no session has to re-learn it.
 
+## Claude's suggestions (take or leave)
+- **Build for WebXR, not WebSpatial.** WebXR runs fully on the Quest 3; WebSpatial pages are flat outside PICO/visionOS.
+- **Emulated Quest 3 on the Mac (IWER).** Already wired in, so the whole team can press Enter VR without the headset.
+  Alternative: Meta's "Immersive Web Emulator" Chrome extension.
+- **Target Quest first and stay within the PICO limits.** One app that runs on both her headset and the event loaners.
+- **One file per feature** (see the playbook), so parallel agents never edit the same lines.
+- **Quest over USB now, over Wi-Fi later.** `npm run usb` needs no setup beyond developer mode. For cable-free testing, install Tailscale on
+  the Mac + Quest and use `npm run serve` (HTTPS URL).
+- **Quest-only extras as optional add-ons:** the Quest Browser also offers depth sensing, mesh detection and anchors that PICO refuses.
+  Use them in `optionalFeatures` behind a feature check, never as a requirement.
+- **Commit after each feature** (git is initialised), so a bad agent edit is a one-line revert.
+
 ## Playbook: how the team builds it
 1. **Metaprompt → spec.** One agent turns the metaprompt into a short feature list, each feature a self-contained module.
 2. **Fan out.** One agent per feature, each writing its own `src/features/<name>.js` that exports `init({ scene, room, renderer, camera, grabbables })`
