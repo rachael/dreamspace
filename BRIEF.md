@@ -59,7 +59,34 @@ Started 2026-09-24, at the PICO "Claude for Spatial Computing" workshop (Homebre
 6. **Lessons** appended below.
 
 ## The metaprompt
-_(paste here when given)_
+Workshop template (from the site):
+```
+Build a new web spatial app using pico cli in the emalutor that does: {enter idea here}. use the vercel link as context on how to build things in Web Spatial.
+
+  we are going to dynamically create team agents, assign roles to each for research, mapping codebase, understanding various independent workflows and build the app. verify each feature
+  before declaring it complete.
+```
+
+Her instructions (2026-09-24, verbatim):
+```
+fan out as many agents as possible do it in webxr get it all working do it as well as you possibly can
+
+lets make a spatial app where you can bridge from voice mode in the app on mobile (ios/android, either works tbh but ios preferred) hands-free chat and we can explore a spatial experience together, eventually we're going to use meshy for asset generation, for now just do it in a modular way where we can sub in different tools later
+
+for now the quest has no battery so in webxr yeah
+
+I'm not sure what you can do in terms of asset generation, probably not that amazing. mvp is also to just use whatever local model and free voice as well or literally if claude code has a hands free mode, I'm not really sure, if CLI does have hands free or you can bridge yourself there... just dont use the API, lets stick to the claude subscription or use free local tools for voice
+
+anyway super cool to be able to just explore a spatial world either with you or with a local voice agent, then eventually bridge you there or bridge the claude from the mobile app (for now I have my airpods and would have to be ios, maybe more difficult)
+
+if you cant do voice text is ok too
+
+also private github repo and run this in the cloud if you can (ideal) just call it whatever i dont have any other webxr demo app repo on gh so there wont be a name collision
+
+afaik i dont have any local modal such as qwen/ollama so just gfi and get one if i dont and you need it
+
+lets go, dude
+```
 
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
