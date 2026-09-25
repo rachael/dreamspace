@@ -1,0 +1,10 @@
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+# screenshots from scripts/snap and local test runs
+shots/
+captures/
+*.tmp

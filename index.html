@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22 fill=%22%234d7cff%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2215%22 fill=%22none%22 stroke=%22%236ee7ff%22 stroke-width=%222%22/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Vibe XR Starter</title>
+  <meta name="description" content="A three.js WebXR scene you remix with Claude Code and open in the PICO browser." />
+  <link rel="stylesheet" href="theme/pico.css" />
+  <style>
+    /* Page chrome only. Colors, fonts, radii and .pico-btn come from theme/pico.css. */
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--pico-bg); color: var(--pico-ink); font-family: var(--pico-font-body); }
+    canvas { display: block; }
+    .pico-overlay { position: fixed; inset: auto 0 0 0; padding: 32px 16px calc(28px + env(safe-area-inset-bottom)); display: grid; justify-items: center; gap: var(--pico-gap, 16px); pointer-events: none; background: linear-gradient(to top, color-mix(in srgb, var(--pico-bg) 92%, transparent) 40%, transparent); }
+    .pico-overlay > * { pointer-events: auto; }
+    .pico-title { margin: 0; text-align: center; font-size: clamp(30px, 6vw, 52px); line-height: 1.05; text-shadow: 0 0 28px color-mix(in srgb, var(--pico-glow) 40%, transparent); }
+    .pico-hint { margin: 0; max-width: 48ch; text-align: center; font-size: 14px; line-height: 1.5; color: var(--pico-ink-dim); }
+    .pico-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; min-height: var(--pico-target, 56px); }
+    /* three's VRButton / ARButton set inline styles; these rules make them .pico-btn look-alikes. */
+    .pico-actions > * {
+      position: static !important; left: auto !important; bottom: auto !important; width: auto !important;
+      display: inline-flex !important; align-items: center; justify-content: center; box-sizing: border-box;
+      min-width: 168px; min-height: var(--pico-target, 56px); padding: 0 24px !important;
+      border: 0 !important; border-radius: 999px !important; opacity: 1 !important;
+      background: var(--pico-accent) !important; color: #fff !important; text-decoration: none !important;
+      font: 700 19px/1 var(--pico-font-body) !important; letter-spacing: .02em;
+      transition: transform 160ms ease, box-shadow 160ms ease;
+    }
+    .pico-actions > *[style*="display: none"] { display: none !important; }
+    .pico-actions > button:hover, .pico-actions > button:focus-visible { box-shadow: 0 0 0 2px var(--pico-glow), 0 0 24px color-mix(in srgb, var(--pico-glow) 45%, transparent); transform: translateY(-2px); outline: none; }
+    .pico-actions > #ARButton { background: var(--pico-surface-2) !important; color: var(--pico-ink) !important; }
+    /* "VR NOT SUPPORTED" / "WEBXR NEEDS HTTPS" states: a quiet chip, not a call to action */
+    .pico-actions > a, .pico-actions > button[style*="cursor: auto"], .pico-actions > #ARButton[style*="cursor: auto"] { background: var(--pico-surface-2) !important; color: var(--pico-ink-dim) !important; font: 500 14px/1.2 var(--pico-font-body) !important; min-height: 40px; box-shadow: none !important; transform: none !important; }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div class="pico-overlay">
+    <span class="pico-chip">PICO · WebXR · three.js</span>
+    <h1 class="pico-title pico-display">Vibe XR Starter</h1>
+    <div class="pico-actions" id="xr-buttons"></div>
+    <p class="pico-hint" id="hint">Drag to orbit. Click the orb to spin it. Open this page over HTTPS in the PICO browser to enter VR or AR.</p>
+  </div>
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
