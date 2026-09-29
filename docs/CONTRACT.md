@@ -177,3 +177,14 @@ Dreamspace is one surface of her "voice-agent metaharness": one Claude across mo
 - `POST {base}/api/{token}/ambient {text, title, source:'dreamspace', tags:['world-event']}`. Keep it **sparse**: batched summaries (e.g. "Rae toured 3 worlds and summoned a portal"), at most one per few minutes, never every op.
 - MCP alternative: `POST {base}/mcp/{token}`, tools `while_away`, `idea_log`, `ideas_list`, `context_ping`, `ambient_ingest` (surface `'spatial'`).
 - Never open a tunnel for contextlog; its public URL comes from its own hosting.
+
+### MCP tools for the Claude-app voice agent (primary driver; spec from projects-d9, 2026-09-29)
+Every tool description opens with *when to use it* in one clause, written for a voice agent. Every result is `{say: "<speakable, ≤200 chars, no ids>", detail: {...structured}}`.
+1. `look_around`: `say` is one line: mood, time of day, and the 3 most notable things with their position relative to Lumen ("to your left, near the crystal"). `detail` holds the full object list with ids.
+2. `say {text, emotion?: 'calm'|'excited'|'curious'|'whisper'}`: Lumen speaks through the HRTF voice. `emotion` changes the voice: `say -r` rate and voice choice on the server, plus echo and wet mix on the client. The emotion rides on the chat event as `emotion`.
+3. `move_guide {to?: <object name/description>, pattern?: 'circle'|'orbit-user'|'follow'|'wander'|'come-close'}`: moves Lumen, and the voice moves with it. World op `{type:'guide', target?: id, pattern?, position?}`; the client animates the motion smoothly. This is the AirPods "wow" moment.
+4. `summon {description, near?}`: natural language in, a short speakable confirmation out.
+5. `set_mood {mood}`: unchanged. (`set_theme`/`list_themes` arrive with the themes phase.)
+6. `propose_creation {description}`: the **default for anything that needs new code**. It POSTs to contextlog ideas (`source:'rae', surface:'spatial'`) and returns `say:"Logged that as an idea."`.
+   `vibe {description}` stays as a separate, explicit instant vibe-code tool for the demo.
+7. Also: `remove`, `clear_world` (confirm-style `say`).
