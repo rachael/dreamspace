@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dreamspace Archetypes</title>
+  <meta name="description" content="Every Dreamspace archetype in one grid, rendered through the real object layer, with per-archetype draw-call and triangle budgets." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2211%22 fill=%22%239fd8ff%22/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #070a1c; --panel: rgba(13, 17, 42, 0.78); --line: rgba(143, 179, 255, 0.18);
+      --ink: #e2e6ff; --dim: #99a1d0; --accent: #9fc2ff; --ok: #6fe3bd; --bad: #ff8fa3;
+      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font: 13px/1.45 var(--font); }
+    canvas { display: block; }
+    .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+    #ui { top: 16px; left: 16px; width: min(330px, calc(100vw - 32px)); padding: 14px 16px 12px; box-sizing: border-box; max-height: calc(100vh - 32px); overflow: auto; }
+    h1 { margin: 0 0 2px; font-size: 17px; font-weight: 650; letter-spacing: .01em; }
+    .sub { margin: 0 0 12px; color: var(--dim); font-size: 12px; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+    button { font: 600 12px var(--font); color: var(--ink); background: rgba(159, 194, 255, 0.1); border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px; cursor: pointer; }
+    button:hover, button:focus-visible { background: rgba(159, 194, 255, 0.22); outline: none; }
+    button[aria-pressed="true"] { background: rgba(159, 194, 255, 0.3); border-color: var(--accent); }
+    label.slider { display: flex; align-items: center; gap: 8px; color: var(--dim); font-size: 12px; margin: 10px 0 4px; }
+    label.slider input { flex: 1; accent-color: var(--accent); }
+    #verdict { margin: 10px 0 6px; font-weight: 650; }
+    #verdict.ok { color: var(--ok); } #verdict.bad { color: var(--bad); }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+    th, td { text-align: left; padding: 3px 4px; border-bottom: 1px solid rgba(143, 179, 255, 0.08); }
+    th { color: var(--dim); font-weight: 500; }
+    td.n { text-align: right; } td.ok { color: var(--ok); } td.bad { color: var(--bad); }
+    tr[data-name] { cursor: pointer; } tr[data-name]:hover td { background: rgba(159, 194, 255, 0.08); }
+    details summary { cursor: pointer; color: var(--dim); margin-top: 6px; }
+    #hud { right: 16px; bottom: 16px; padding: 8px 12px; font-variant-numeric: tabular-nums; color: var(--dim); font-size: 12px; }
+    #hud b { color: var(--ink); font-weight: 600; }
+    #vr { position: fixed; right: 16px; top: 16px; }
+    #vr > * { position: static !important; width: auto !important; left: auto !important; bottom: auto !important; padding: 8px 14px !important; border-radius: 999px !important; font: 600 12px var(--font) !important; background: var(--panel) !important; border: 1px solid var(--line) !important; opacity: 1 !important; }
+    .label { pointer-events: none; text-align: center; transform: translateY(-6px); }
+    .label .t { font-weight: 650; font-size: 12.5px; color: var(--ink); text-shadow: 0 1px 8px rgba(0, 0, 0, .9); }
+    .label .s { font-size: 11px; color: var(--dim); text-shadow: 0 1px 6px rgba(0, 0, 0, .9); }
+    .label .s.bad { color: var(--bad); }
+    #toast { left: 50%; bottom: 16px; transform: translateX(-50%); padding: 8px 14px; max-width: min(560px, calc(100vw - 32px)); box-sizing: border-box; color: var(--dim); font-size: 12px; opacity: 0; transition: opacity .4s; pointer-events: none; }
+    #toast.on { opacity: 1; }
+    @media (max-width: 640px) { #ui { max-height: 46vh; } #hud { display: none; } }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="ui" class="panel">
+    <h1>Dreamspace · archetypes</h1>
+    <p class="sub">Every archetype, plus parts and GLB, rendered through <code>objects.js</code>. Drag to orbit, click an object to focus it.</p>
+    <div class="row">
+      <button id="b-respawn" title="R">Respawn all</button>
+      <button id="b-clear" title="C">Clear</button>
+      <button id="b-float" aria-pressed="false" title="F">Float all</button>
+    </div>
+    <div class="row">
+      <button id="b-colors" title="K">Random colours</button>
+      <button id="b-variant" title="V">Next variant</button>
+      <button id="b-light" aria-pressed="false" title="L">Starter lights</button>
+      <button id="b-home" title="H">Overview</button>
+    </div>
+    <label class="slider">Glow <input id="glow" type="range" min="0" max="1" step="0.01" value="0.5" /> <span id="glow-v">0.50</span></label>
+    <div id="verdict">Measuring…</div>
+    <details open>
+      <summary>Budget per object (≤ 4 draw calls, ≤ 5,000 triangles; ground objects include their islet)</summary>
+      <table><thead><tr><th>archetype</th><th class="n">calls</th><th class="n">tris</th><th></th></tr></thead><tbody id="stats"></tbody></table>
+    </details>
+  </div>
+  <div id="hud" class="panel">fps <b id="fps">–</b> · calls <b id="calls">–</b> · tris <b id="tris">–</b> · objects <b id="count">–</b></div>
+  <div id="vr"></div>
+  <div id="toast" class="panel"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
+    import { VRButton } from 'three/addons/webxr/VRButton.js';
+    import { buildArchetype, buildParts, ARCHETYPES } from '../src/world/archetypes.js';
+    import { createObjectLayer } from '../src/world/objects.js';
+
+    const P = (window.__preview = { ready: false, errors: [], stats: {}, budget: { calls: 4, tris: 5000 } });
+    addEventListener('error', (e) => P.errors.push(String(e.message || e)));
+    addEventListener('unhandledrejection', (e) => P.errors.push(String(e.reason?.message || e.reason)));
+    const origError = console.error.bind(console);
+    console.error = (...a) => { P.errors.push(a.map(String).join(' ')); origError(...a); };
+
+    const q = new URLSearchParams(location.search);
+    const $ = (id) => document.getElementById(id);
+    const toast = (msg) => { const el = $('toast'); el.textContent = msg; el.classList.add('on'); clearTimeout(toast.t); toast.t = setTimeout(() => el.classList.remove('on'), 2600); };
+
+    // ---------- renderer, scene
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.xr.enabled = true;
+    document.body.prepend(renderer.domElement);
+    const labels = new CSS2DRenderer();
+    labels.setSize(innerWidth, innerHeight);
+    Object.assign(labels.domElement.style, { position: 'fixed', inset: '0', pointerEvents: 'none' });
+    document.body.appendChild(labels.domElement);
+
+    const scene = new THREE.Scene();
+    const room = new THREE.Group();
+    scene.add(room);
+    const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.05, 200);
+    const CENTER = new THREE.Vector3(0, 0.4, -7.2);
+    const HOME = new THREE.Vector3(0, 10.5, 5.2);
+    camera.position.copy(HOME);
+    const orbit = new OrbitControls(camera, renderer.domElement);
+    orbit.target.copy(CENTER);
+    orbit.enableDamping = true;
+    orbit.maxPolarAngle = Math.PI * 0.49;
+    orbit.update();
+    $('vr').append(VRButton.createButton(renderer));
+
+    // lights: calm twilight by default; "Starter lights" mimics src/main.js (bright white hemisphere + key)
+    const dirLight = (c, i, x, y, z) => { const l = new THREE.DirectionalLight(c, i); l.position.set(x, y, z); return l; };
+    const twilight = [new THREE.HemisphereLight('#aab8ff', '#1b1433', 0.85), dirLight('#ffe7d1', 1.0, 3, 6, 4)];
+    const starter = [new THREE.HemisphereLight('#ffffff', '#000000', 1.0), dirLight('#ffffff', 1.6, 2, 4, 2)];
+    for (const l of [...twilight, ...starter]) scene.add(l);
+    const setStarter = (on) => { twilight.forEach((l) => (l.visible = !on)); starter.forEach((l) => (l.visible = on)); $('b-light').setAttribute('aria-pressed', String(on)); };
+    setStarter(false);
+
+    // backdrop: gradient sky, a few stars, a soft ground (or the real environment with ?env=1)
+    let env = null;
+    const backdrop = new THREE.Group();
+    {
+      const sky = new THREE.SphereGeometry(90, 32, 16);
+      const col = [], top = new THREE.Color('#0a0d2e'), mid = new THREE.Color('#1b1446'), low = new THREE.Color('#0d2a3a');
+      const p = sky.attributes.position;
+      for (let i = 0; i < p.count; i++) { const y = p.getY(i) / 90; const c = y > 0.05 ? mid.clone().lerp(top, Math.min(1, y * 1.6)) : low.clone().lerp(mid, Math.max(0, (y + 0.3) / 0.35)); col.push(c.r, c.g, c.b); }
+      sky.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+      backdrop.add(new THREE.Mesh(sky, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.BackSide, fog: false, depthWrite: false })));
+      const sp = [];
+      for (let i = 0; i < 700; i++) { const u = Math.random() * 2 - 1, a = Math.random() * Math.PI * 2, r = Math.sqrt(1 - u * u); if (u < 0.08) continue; sp.push(Math.cos(a) * r * 85, u * 85, Math.sin(a) * r * 85); }
+      const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
+      backdrop.add(new THREE.Points(sg, new THREE.PointsMaterial({ color: '#cfd8ff', size: 1.6, sizeAttenuation: false, fog: false, transparent: true, opacity: 0.7 })));
+      const ground = new THREE.CircleGeometry(40, 72);
+      ground.rotateX(-Math.PI / 2);
+      const gc = [], gp = ground.attributes.position, gi = new THREE.Color('#1a1838'), go = new THREE.Color('#0a0b1e');
+      for (let i = 0; i < gp.count; i++) { const d = Math.hypot(gp.getX(i), gp.getZ(i) - CENTER.z) / 18; const c = gi.clone().lerp(go, Math.min(1, d)); gc.push(c.r, c.g, c.b); }
+      ground.setAttribute('color', new THREE.Float32BufferAttribute(gc, 3));
+      backdrop.add(new THREE.Mesh(ground, new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 })));
+      room.add(backdrop);
+      scene.fog = new THREE.FogExp2('#110f33', 0.028);
+    }
+    if (q.has('env')) {
+      try {
+        const mod = await import('../src/world/environment.js');
+        env = mod.createEnvironment({ scene, room, THREE, renderer });
+        backdrop.visible = false;
+        toast('Using src/world/environment.js');
+      } catch (err) { console.warn('[preview] environment.js not usable yet:', err); toast('environment.js not usable yet, showing the preview backdrop'); }
+    }
+
+    // ---------- the cells
+    const EXTRA = [
+      { key: 'parts', label: 'parts (lamp)', asset: { type: 'parts', parts: [
+        { shape: 'cylinder', size: [0.34, 0.1, 0.34], position: [0, 0.05, 0], rotation: [0, 0, 0], color: '#3d3a5c', material: 'matte' },
+        { shape: 'cylinder', size: [0.07, 1.3, 0.07], position: [0, 0.75, 0], rotation: [0, 0, 0], color: '#5a557e', material: 'matte' },
+        { shape: 'torus', size: [0.3, 0.03, 0.3], position: [0, 1.3, 0], rotation: [0, 0, 0], color: '#7fd8ff', material: 'glow', emissive: 0.8 },
+        { shape: 'sphere', size: [0.26, 0.26, 0.26], position: [0, 1.52, 0], rotation: [0, 0, 0], color: '#ffc46b', material: 'glow', emissive: 0.9 },
+        { shape: 'icosahedron', size: [0.36, 0.36, 0.36], position: [0, 1.52, 0], rotation: [0, 0, 0], color: '#bfe8ff', material: 'glass' },
+        { shape: 'cone', size: [0.2, 0.18, 0.2], position: [0, 1.78, 0], rotation: [0, 0, 0], color: '#5a557e', material: 'matte' },
+      ] } },
+      { key: 'glb-ok', label: 'glb (exported)', asset: null },
+      { key: 'glb-bad', label: 'glb (bad url → wisp)', asset: { type: 'glb', url: 'missing-model-on-purpose.glb' } },
+      { key: 'unknown', label: '"dragon" → wisp', asset: { type: 'archetype', archetype: 'dragon', params: {} } },
+    ];
+    const COLS = 5, GAP = 3.6;
+    const names = [...ARCHETYPES];
+    let floatAll = q.has('float');
+    let variant = 0;
+    let colors = {};
+    const cellPos = (i) => [((i % COLS) - (COLS - 1) / 2) * GAP, (Math.floor(i / COLS) - 1.5) * GAP + CENTER.z];
+
+    async function makeGlbUrl() {
+      // a little lantern-like tower exported to GLB in-page, so the GLTFLoader success path is exercised offline
+      const { GLTFExporter } = await import('three/addons/exporters/GLTFExporter.js');
+      const g = new THREE.Group();
+      const stone = new THREE.MeshStandardMaterial({ color: '#4a4670', roughness: 0.8, flatShading: true });
+      const glow = new THREE.MeshStandardMaterial({ color: '#9fe8ff', emissive: '#6fdcff', emissiveIntensity: 1.2 });
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.6, 0.3, 7), stone); base.position.y = 0.15;
+      const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.4, 1.6, 7), stone); tower.position.y = 1.1;
+      const gem = new THREE.Mesh(new THREE.OctahedronGeometry(0.28), glow); gem.position.y = 2.2; gem.scale.y = 1.5;
+      g.add(base, tower, gem);
+      const buf = await new GLTFExporter().parseAsync(g, { binary: true });
+      return URL.createObjectURL(new Blob([buf], { type: 'model/gltf-binary' }));
+    }
+
+    function worldFor() {
+      const objects = [];
+      names.forEach((n, i) => {
+        const [x, z] = cellPos(i);
+        const probe = infoOf(n);
+        objects.push({ id: `a-${n}`, name: n, description: `archetype ${n}`, asset: { type: 'archetype', archetype: n, params: { variant, ...(colors[n] || {}) } },
+          position: [x, probe.anchor === 'float' ? 1.25 : floatAll ? 1.0 : 0, z], rotationY: n === 'spaceship' ? -0.5 : 0, scale: 1, createdBy: 'guide', createdAt: 0 });
+      });
+      EXTRA.forEach((c, j) => {
+        const [x, z] = cellPos(names.length + j);
+        if (!c.asset) return;
+        const float = c.key === 'unknown' || c.key === 'glb-bad';
+        objects.push({ id: `x-${c.key}`, name: c.label, description: c.label, asset: c.asset, position: [x, float ? 1.25 : floatAll ? 1.0 : 0, z], rotationY: 0, scale: 1, createdBy: 'guide', createdAt: 0 });
+      });
+      return { version: 1, mood: { preset: 'twilight', fog: 0.4, glow: Number($('glow').value) }, objects };
+    }
+    const infoCache = {};
+    function infoOf(n) { if (!infoCache[n]) { const o = buildArchetype(THREE, n, {}); infoCache[n] = { anchor: o.userData.anchor, height: o.userData.height, radius: o.userData.radius }; o.userData.dispose(); } return infoCache[n]; }
+
+    // ---------- labels
+    const labelObjs = [];
+    function placeLabels() {
+      for (const l of labelObjs) l.removeFromParent();
+      labelObjs.length = 0;
+      const all = [...names.map((n) => ({ key: n, label: n })), ...EXTRA];
+      all.forEach((c, i) => {
+        const [x, z] = cellPos(i);
+        const el = document.createElement('div');
+        el.className = 'label';
+        const s = P.stats[c.key];
+        el.innerHTML = `<div class="t">${c.label}</div>` + (s ? `<div class="s ${s.ok ? '' : 'bad'}">${s.calls} calls · ${s.tris.toLocaleString()} tris</div>` : '');
+        const lo = new CSS2DObject(el);
+        const info = names.includes(c.key) ? infoOf(c.key) : { anchor: 'ground', height: 1.9 };
+        lo.position.set(x, info.anchor === 'float' ? 1.25 + (info.radius || 0.5) + 0.35 : (floatAll ? 1.0 : 0) + (info.height || 1.5) + 0.35, z);
+        scene.add(lo);
+        labelObjs.push(lo);
+      });
+    }
+
+    // ---------- budgets, measured with renderer.info on a solo render of each archetype (islet on for ground ones)
+    function measure() {
+      const s = new THREE.Scene();
+      s.add(new THREE.HemisphereLight('#aab8ff', '#1b1433', 0.85));
+      const cam = new THREE.PerspectiveCamera(50, 1, 0.05, 100);
+      const rows = [];
+      const probe = (key, obj) => {
+        obj.userData.setFloating?.(obj.userData.anchor === 'ground');
+        s.add(obj);
+        const h = obj.userData.height || 1;
+        cam.position.set(0, h * 0.5, 7); cam.lookAt(0, h * 0.4, 0); cam.updateMatrixWorld();
+        renderer.render(s, cam);
+        const r = { calls: renderer.info.render.calls, tris: renderer.info.render.triangles };
+        r.ok = r.calls <= P.budget.calls && r.tris <= P.budget.tris;
+        P.stats[key] = r;
+        rows.push([key, r]);
+        s.remove(obj);
+        obj.userData.dispose?.();
+      };
+      for (const n of names) probe(n, buildArchetype(THREE, n, { variant }));
+      probe('parts', buildParts(THREE, EXTRA[0].asset.parts));
+      renderer.clear();
+      P.allOk = rows.every(([, r]) => r.ok);
+      $('stats').innerHTML = rows.map(([k, r]) => `<tr data-name="${k}"><td>${k}</td><td class="n">${r.calls}</td><td class="n">${r.tris.toLocaleString()}</td><td class="${r.ok ? 'ok' : 'bad'}">${r.ok ? '✓' : '✗'}</td></tr>`).join('');
+      const v = $('verdict');
+      v.textContent = P.allOk ? `All ${rows.length} within budget (variant ${variant})` : `Over budget: ${rows.filter(([, r]) => !r.ok).map(([k]) => k).join(', ')}`;
+      v.className = P.allOk ? 'ok' : 'bad';
+    }
+    // ---------- the layer
+    const layer = createObjectLayer({ scene, THREE });
+    let world = worldFor();
+    const glbCell = EXTRA.find((c) => c.key === 'glb-ok');
+    function resync() { world = worldFor(); layer.sync(world); $('count').textContent = layer.size; }
+
+    function respawn() { layer.apply({ type: 'clear' }); setTimeout(() => { world = worldFor(); layer.sync(world); $('count').textContent = layer.size; }, 900); }
+
+    // ---------- interaction
+    const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+    let focusTo = null;
+    function focusOn(id) {
+      const r = layer.get(id);
+      if (!r) return;
+      const p = r.position.clone();
+      const info = r.children[0]?.children[0]?.userData || {};
+      const h = info.anchor === 'float' ? 0 : (info.height || 1.5) * 0.45;
+      const tgt = p.clone().add(new THREE.Vector3(0, h + (r.children[0]?.position.y || 0), 0));
+      const d = Math.max(2.4, (info.radius || 0.8) * 3.4);
+      focusTo = { target: tgt, pos: tgt.clone().add(new THREE.Vector3(d * 0.35, d * 0.28, d)) };
+      toast(`${r.userData.name}${r.userData.description && r.userData.description !== r.userData.name ? ' · ' + r.userData.description : ''}`);
+    }
+    renderer.domElement.addEventListener('pointerdown', (e) => { ptr.set(e.clientX, e.clientY); });
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      if (Math.hypot(e.clientX - ptr.x, e.clientY - ptr.y) > 4) return;
+      ray.setFromCamera(new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+      const hit = ray.intersectObjects(layer.pickables, true)[0];
+      const id = hit && layer.idOf(hit.object);
+      if (id) focusOn(id);
+    });
+    $('stats').addEventListener('click', (e) => { const tr = e.target.closest('tr[data-name]'); if (tr) focusOn(tr.dataset.name === 'parts' ? 'x-parts' : `a-${tr.dataset.name}`); });
+    const home = () => { focusTo = { target: CENTER.clone(), pos: HOME.clone() }; };
+    const actions = {
+      respawn, home,
+      clear: () => { layer.apply({ type: 'clear' }); },
+      float: (on = !floatAll) => { floatAll = !!on; $('b-float').setAttribute('aria-pressed', String(floatAll)); resync(); placeLabels(); },
+      glow: (v) => { $('glow').value = v; $('glow-v').textContent = Number(v).toFixed(2); layer.apply({ type: 'mood', glow: Number(v) }); },
+      recolor: () => {
+        const pal = ['#ff9fd0', '#8fe6c9', '#ffd27a', '#9fb4ff', '#c79bff', '#7fe0ff', '#ffb38a', 'crimson', 'lime', '#0000ff'];
+        colors = {};
+        for (const n of names) colors[n] = { color: pal[Math.floor(Math.random() * pal.length)], accent: pal[Math.floor(Math.random() * pal.length)] };
+        resync();
+        toast('New colours (pure primaries like "lime" and "#0000ff" get softened on purpose)');
+      },
+      variant: () => { variant = (variant + 1) % 3; resync(); measure(); placeLabels(); toast(`Variant ${variant}`); },
+      starter: (on) => setStarter(on ?? !starter[0].visible),
+      focus: (name) => focusOn(name.startsWith('a-') || name.startsWith('x-') ? name : `a-${name}`),
+    };
+    P.actions = actions;
+    $('b-respawn').onclick = actions.respawn;
+    $('b-clear').onclick = actions.clear;
+    $('b-float').onclick = () => actions.float();
+    $('b-colors').onclick = actions.recolor;
+    $('b-variant').onclick = actions.variant;
+    $('b-light').onclick = () => actions.starter();
+    $('b-home').onclick = home;
+    $('glow').oninput = (e) => actions.glow(e.target.value);
+    addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      const k = e.key.toLowerCase();
+      ({ r: actions.respawn, c: actions.clear, f: () => actions.float(), k: actions.recolor, v: actions.variant, l: () => actions.starter(), h: home })[k]?.();
+    });
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight); labels.setSize(innerWidth, innerHeight);
+    });
+
+    // ---------- start
+    measure();
+    placeLabels();
+    resync();
+    makeGlbUrl().then((url) => {
+      glbCell.asset = { type: 'glb', url };
+      resync();
+    }).catch((err) => console.warn('[preview] could not export the test GLB', err));
+    if (q.has('float')) $('b-float').setAttribute('aria-pressed', 'true');
+
+    const timer = new THREE.Timer();
+    let frames = 0, acc = 0, extra = 0;
+    // For test agents on slow software GL: advance the world by `sec` in fixed 1/60 s steps, then render once.
+    P.advance = (sec = 1) => {
+      const n = Math.max(1, Math.round(sec * 60));
+      for (let i = 0; i < n; i++) { extra += 1 / 60; layer.update(1 / 60, timer.getElapsed() + extra); env?.update?.(1 / 60, timer.getElapsed() + extra); }
+      renderer.render(scene, camera); labels.render(scene, camera);
+      return { objects: layer.size, calls: renderer.info.render.calls, tris: renderer.info.render.triangles };
+    };
+    renderer.setAnimationLoop((time) => {
+      timer.update(time);
+      const dt = Math.min(timer.getDelta(), 0.1), t = timer.getElapsed() + extra;
+      layer.update(dt, t);
+      env?.update?.(dt, t);
+      if (focusTo && !renderer.xr.isPresenting) {
+        const k = 1 - Math.exp(-dt * 3);
+        orbit.target.lerp(focusTo.target, k); camera.position.lerp(focusTo.pos, k);
+        if (camera.position.distanceTo(focusTo.pos) < 0.02) focusTo = null;
+      }
+      if (!renderer.xr.isPresenting) orbit.update();
+      renderer.render(scene, camera);
+      labels.render(scene, camera);
+      frames++; acc += dt;
+      if (acc > 0.5) {
+        $('fps').textContent = Math.round(frames / acc); frames = 0; acc = 0;
+        $('calls').textContent = renderer.info.render.calls; $('tris').textContent = renderer.info.render.triangles.toLocaleString();
+        $('count').textContent = layer.size;
+        P.frame = { calls: renderer.info.render.calls, tris: renderer.info.render.triangles, objects: layer.size };
+      }
+    });
+    Object.assign(P, { ready: true, THREE, scene, renderer, camera, layer, get world() { return world; } });
+  </script>
+</body>
+</html>

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Dreamspace Environment Preview</title>
+  <link rel="icon" href="data:," />
+  <meta name="description" content="Standalone preview of src/world/environment.js: moods, fog, glow, AR toggle, draw-call and shader-error readout." />
+  <style>
+    :root { --bg: #07131f; --panel: rgba(12, 16, 38, 0.78); --ink: #e6ecff; --dim: #9aa6c8; --accent: #7fe9ff; --edge: rgba(127, 233, 255, 0.22); }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+    canvas { display: block; }
+    #hud { position: fixed; left: 16px; bottom: 16px; max-width: min(520px, calc(100vw - 32px)); box-sizing: border-box; padding: 14px 16px;
+      background: var(--panel); border: 1px solid var(--edge); border-radius: 16px; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+    #hud h1 { margin: 0 0 8px; font-size: 15px; font-weight: 600; letter-spacing: .04em; color: var(--accent); }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    .chip { appearance: none; border: 1px solid var(--edge); background: transparent; color: var(--ink); border-radius: 999px; padding: 6px 12px; font: inherit; cursor: pointer; }
+    .chip[aria-pressed="true"] { background: rgba(127, 233, 255, 0.16); border-color: var(--accent); }
+    label { color: var(--dim); display: inline-flex; gap: 6px; align-items: center; }
+    input[type=range] { width: 120px; accent-color: #7fe9ff; }
+    #stats { font: 12px/1.4 ui-monospace, "SF Mono", Menlo, monospace; color: var(--dim); white-space: pre-wrap; }
+    #stats.bad { color: #ff8a9a; }
+    #xr { display: contents; }
+    #xr > * { position: static !important; left: auto !important; bottom: auto !important; width: auto !important; padding: 6px 12px !important;
+      border-radius: 999px !important; border: 1px solid var(--edge) !important; background: transparent !important; color: var(--ink) !important;
+      font: inherit !important; opacity: 1 !important; }
+    body.nohud #hud { display: none; }
+    @media (max-width: 480px) { #hud { left: 8px; right: 8px; bottom: 8px; max-width: none; } input[type=range] { width: 90px; } }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <h1>Dreamspace · environment preview</h1>
+    <div class="row" id="moods"></div>
+    <div class="row">
+      <label>fog <input id="fog" type="range" min="0" max="1" step="0.01" /></label>
+      <label>glow <input id="glow" type="range" min="0" max="1" step="0.01" /></label>
+      <label><input id="ar" type="checkbox" /> AR (hide)</label>
+      <span id="xr"></span>
+    </div>
+    <div class="row">
+      <button class="chip" data-cam="front">front</button>
+      <button class="chip" data-cam="up">sky</button>
+      <button class="chip" data-cam="back">behind</button>
+      <button class="chip" data-cam="edge">edge</button>
+      <button class="chip" data-cam="rune">rune</button>
+    </div>
+    <div id="stats">loading…</div>
+  </div>
+  <!-- Machine-readable status for scripted checks (headless Chrome --dump-dom, or the browser agent): -->
+  <script id="env-status" type="application/json">{"ready":false}</script>
+  <script type="module">
+    // URL params: ?mood=aurora&fog=0.4&glow=0.7&ar=1&cam=front|up|back|edge|rune&t=40 (time offset, s)&hud=0&emu (load IWER)
+    const q = new URLSearchParams(location.search);
+    const status = { ready: false, errors: [], warnings: [], perMood: {}, env: null, gl: null };
+    const statusEl = document.getElementById('env-status');
+    const writeStatus = () => { statusEl.textContent = JSON.stringify(status); };
+    addEventListener('error', (e) => { status.errors.push(`window error: ${e.message}`); writeStatus(); });
+    addEventListener('unhandledrejection', (e) => { status.errors.push(`unhandled: ${e.reason?.message || e.reason}`); writeStatus(); });
+    if (q.get('hud') === '0') document.body.classList.add('nohud');
+
+    try {
+      if (q.has('emu')) { try { await import('../src/emulator.js'); } catch (e) { status.warnings.push(`emulator: ${e.message}`); } }
+      const THREE = await import('three');
+      const { OrbitControls } = await import('three/addons/controls/OrbitControls.js');
+      const { VRButton } = await import('three/addons/webxr/VRButton.js');
+      const { createEnvironment, MOOD_NAMES } = await import('../src/world/environment.js');
+
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+      renderer.setSize(innerWidth, innerHeight);
+      renderer.xr.enabled = true;
+      renderer.debug.checkShaderErrors = true;
+      renderer.debug.onShaderError = (gl, program, vs, fs) => {
+        const log = [gl.getProgramInfoLog(program), gl.getShaderInfoLog(vs), gl.getShaderInfoLog(fs)].filter(Boolean).join('\n').trim();
+        status.errors.push(`shader: ${log || '(no log)'}`);
+        console.error('[env preview] shader error', log);
+        writeStatus();
+      };
+      document.body.prepend(renderer.domElement);
+
+      // same camera settings as src/main.js (near 0.05, far 100) so the far-plane rules are exercised
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 100);
+      const room = new THREE.Group(); room.name = 'room'; scene.add(room);
+      const env = createEnvironment({ scene, room, THREE, renderer });
+
+      const orbit = new OrbitControls(camera, renderer.domElement);
+      orbit.enableDamping = true;
+      const CAMS = {
+        front: [[0, 1.65, 3.2], [0, 2.2, -6]],
+        up: [[0, 1.6, 0.6], [-1.5, 7.5, -8]],
+        back: [[0, 1.65, -2.5], [0, 2.4, 8]],
+        edge: [[0, 1.6, 7.2], [0, -9, 24]],
+        rune: [[0, 3.4, 2.6], [0, 0, -0.2]],
+      };
+      const setCam = (name) => {
+        const c = CAMS[name] || CAMS.front;
+        camera.position.set(...c[0]); orbit.target.set(...c[1]); orbit.update();
+      };
+      setCam(q.get('cam'));
+
+      // --- controls
+      const moodsEl = document.getElementById('moods');
+      const fogEl = document.getElementById('fog'), glowEl = document.getElementById('glow'), arEl = document.getElementById('ar');
+      const refreshUI = () => {
+        const m = env.getMood();
+        for (const b of moodsEl.children) b.setAttribute('aria-pressed', String(b.dataset.mood === m.preset));
+        fogEl.value = m.fog; glowEl.value = m.glow;
+      };
+      for (const name of MOOD_NAMES) {
+        const b = document.createElement('button');
+        b.className = 'chip'; b.textContent = name; b.dataset.mood = name;
+        b.onclick = () => { env.setMood({ preset: name }); refreshUI(); };
+        moodsEl.append(b);
+      }
+      fogEl.oninput = () => env.setMood({ fog: Number(fogEl.value) });
+      glowEl.oninput = () => env.setMood({ glow: Number(glowEl.value) });
+      arEl.onchange = () => env.setAR(arEl.checked);
+      for (const b of document.querySelectorAll('[data-cam]')) b.onclick = () => setCam(b.dataset.cam);
+      document.getElementById('xr').append(VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] }));
+
+      // --- compile everything, then render one frame per mood (catches shader errors on this GPU)
+      const t0 = Number(q.get('t')) || 0;
+      renderer.compile(scene, camera);
+      for (const name of MOOD_NAMES) {
+        env.setMood({ preset: name }, { instant: true });
+        env.update(0, t0);
+        renderer.render(scene, camera);
+        status.perMood[name] = { calls: renderer.info.render.calls, triangles: renderer.info.render.triangles, points: renderer.info.render.points };
+      }
+      env.setMood({ preset: q.get('mood') || 'twilight', fog: q.get('fog') ?? undefined, glow: q.get('glow') ?? undefined }, { instant: true });
+      if (q.get('ar') === '1') { arEl.checked = true; env.setAR(true); }
+      refreshUI();
+      const gl = renderer.getContext();
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      status.gl = { version: gl.getParameter(gl.VERSION), renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER), programs: renderer.info.programs?.length ?? null };
+      status.env = env.stats();
+      status.ready = true;
+      writeStatus();
+
+      // --- loop
+      const timer = new THREE.Timer();
+      const statsEl = document.getElementById('stats');
+      let fps = 0, acc = 0, frames = 0;
+      renderer.setAnimationLoop((time) => {
+        timer.update(time);
+        const dt = Math.min(timer.getDelta(), 0.1), t = t0 + timer.getElapsed();
+        env.update(dt, t);
+        if (!renderer.xr.isPresenting) orbit.update();
+        renderer.render(scene, camera);
+        acc += dt; frames++;
+        if (acc > 0.5) {
+          fps = frames / acc; acc = 0; frames = 0;
+          const i = renderer.info.render, s = status.env;
+          statsEl.textContent = `${fps.toFixed(0)} fps · ${i.calls} draw calls · ${Math.round(i.triangles / 1000)}k tris · ${i.points} points\n` +
+            `env: ${s.drawCalls} draws / ${Math.round(s.triangles / 1000)}k tris (budget 30 / 120k) · ${status.gl.renderer}\n` +
+            (status.errors.length ? `${status.errors.length} error(s): ${status.errors[0].slice(0, 160)}` : 'no shader errors');
+          statsEl.classList.toggle('bad', status.errors.length > 0);
+          status.fps = Math.round(fps); status.live = { calls: i.calls, triangles: i.triangles }; writeStatus();
+        }
+      });
+      addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+      window.__env = { env, renderer, scene, camera, status, setCam, THREE };
+    } catch (err) {
+      status.errors.push(`init: ${err && err.stack || err}`);
+      document.getElementById('stats').textContent = `failed: ${err && err.message || err}`;
+      document.getElementById('stats').classList.add('bad');
+      writeStatus();
+      console.error(err);
+    }
+  </script>
+</body>
+</html>

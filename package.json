@@ -2,12 +2,16 @@
   "name": "webxr-app",
   "version": "0.1.0",
   "private": true,
-  "description": "Vibe XR with PICO CLI: a three.js WebXR starter you remix with Claude Code and open in the PICO browser.",
+  "description": "Dreamspace: a calm sci-fi and fantasy WebXR world (Quest 3, PICO) with a guide you talk to hands-free from your iPhone. Swappable brains (Claude Code on the subscription, local ollama, scripted) and asset providers (archetypes, primitive parts, Meshy later).",
   "type": "module",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
+    "up": "node scripts/up.mjs",
+    "start": "node server/app.mjs",
+    "tunnel": "cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787",
+    "smoke": "node server/smoke.mjs",
     "dev": "node serve/serve.mjs",
     "serve": "node serve/start.mjs",
     "usb": "node serve/start.mjs --usb"

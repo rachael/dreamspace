@@ -8,3 +8,12 @@ Thumbs.db
 shots/
 captures/
 *.tmp
+
+# Dreamspace
+# the world token (and any MESHY_API_KEY): never commit
+.env.local
+# world.json, settings, logs, the claude brain's scratch dir, downloaded Meshy models
+.data/
+# whisper model (~148 MB; scripts/up.mjs downloads it on first run)
+models/
+*.part

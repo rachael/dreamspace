@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Dreamspace: the guide's light with a planet's ring, on a twilight sky. Full-bleed so iOS/Android can mask it. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d1546"/>
+      <stop offset=".55" stop-color="#0d1a36"/>
+      <stop offset="1" stop-color="#06222b"/>
+    </linearGradient>
+    <radialGradient id="core" cx=".4" cy=".36" r=".64">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset=".28" stop-color="#c4fff6"/>
+      <stop offset=".68" stop-color="#4cc7c6"/>
+      <stop offset="1" stop-color="#2b4f8c"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#sky)"/>
+  <g fill="#e8e4ff">
+    <circle cx="112" cy="118" r="4" opacity=".7"/>
+    <circle cx="404" cy="96" r="3" opacity=".55"/>
+    <circle cx="430" cy="372" r="3.5" opacity=".45"/>
+    <circle cx="86" cy="394" r="2.5" opacity=".4"/>
+    <circle cx="348" cy="150" r="2" opacity=".5"/>
+  </g>
+  <g transform="rotate(-16 256 262)">
+    <ellipse cx="256" cy="262" rx="156" ry="40" fill="none" stroke="#a99cff" stroke-opacity=".45" stroke-width="8"/>
+    <circle cx="256" cy="262" r="80" fill="url(#core)"/>
+    <path d="M100 262 A156 40 0 0 0 412 262" fill="none" stroke="#d6ceff" stroke-width="8" stroke-linecap="round"/>
+  </g>
+</svg>
