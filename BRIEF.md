@@ -103,6 +103,7 @@ Meshy: she's getting a free Pro month **when Meshy reaches out, not before**. Do
 Repo: github.com/rachael/dreamspace (private, SSH).
 
 Correction (her words): "no it doesnt this is separate like a game and agent is claude app hands free if it's connected and plaud can send claude.ai transcript in realtime or use obsidian/claude.ai orchestrate w other session"
+Hardware at the demo: the Plaud mic and a magnetic phone backer are connected when available (they feed the Claude app/other session, not Dreamspace directly).
 → No while-away greeting and no context pull. The Claude app (hands-free) is the agent, via the MCP connector.
 
 ## Lessons so far
