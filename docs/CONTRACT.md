@@ -147,3 +147,12 @@ She wants to "vibe build a WebXR app by voice": say what you want, and Claude wr
 | vibe | `server/vibe.mjs`, `src/world/creations.js`, `creations/README.md` (server-core mounts `/api/vibe`, `/api/creations` by importing `handleVibe(req,res,ctx)` / `listCreations()` from `server/vibe.mjs`) |
 | ops | `package.json`, `scripts/up.mjs`, `.gitignore`, `README.md` |
 | integrator (after the builders) | `src/main.js`, `index.html` |
+
+## Themes: voice-swappable looks (next phase, built by the themes workflow; current builders ignore this section)
+Her words: "the looks can be swapped depending on what I say to the voice agent running the experience :) we will go through the environment together. The voice agent can narrate and be the one taking the ideas."
+- A theme is `src/world/themes/<key>.js`: `export default { key, label, blurb, moods?, create({THREE, scene, room, renderer}) → { update(dt,t), setMood(mood), setAR(bool), dispose() } }`.
+  Each theme has the same budget as the environment (≤ 30 draw calls, ≤ 120k tris), puts everything in `room`, and handles every mood preset. `blurb` is 1–2 sentences the guide can narrate.
+- `src/world/themes/index.js` holds the registry and loader: `createThemeHost({THREE, scene, room, renderer})` → `{ set(key) (crossfade, disposing the old one), update, setMood, setAR, list() }`. The existing `environment.js` becomes the `twilight` theme, or its host.
+- World gains `theme: string` (default `'twilight'`). Op `{type:'theme', name}` is validated against `server/themes.mjs` (keys, labels, blurbs, shared by the brains and MCP). SSE `op` carries it like any op.
+- Brains: persona, scripted and ollama learn themes ("take me somewhere bioluminescent", "next world", "show me around"). A **tour**: the guide steps through the themes one at a time, narrating each blurb and asking what she thinks. Her ideas during the tour ("more fireflies here", "make it warmer") become ops or vibe requests. MCP gets `set_theme {name}` and `list_themes`.
+- Hackathon integration: another Claude Code session (building her hackathon app) will use Dreamspace as a frontend surface. Keep the HTTP/SSE/MCP API stable and documented; coordinate through Rae.
