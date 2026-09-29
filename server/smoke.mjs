@@ -6,7 +6,8 @@
 // Starts the app on a random free port in 18000-18999 with a temp DATA_DIR and a temp env file, so it never touches
 // .data/ or .env.local. It never talks to a model: brains are limited to `scripted` (BRAINS_ENABLED) and assets to
 // `archetype` (ASSET_PROVIDERS), and speech-to-text goes to a fake whisper-server started here.
-// Checks: health, static safety, auth (401), world ops + limits, SSE (snapshot first, op, chat, status, pings),
+// Checks: health, static safety, auth (401), world ops + limits + spacing, SSE (snapshot first, op, chat, status, pings),
+// the long-poll twin /api/events/poll,
 // a chat round-trip with brain=scripted, /api/say, /api/stt, the vibe + MCP mounts (including an MCP tool call that
 // changes the world), persistence across a restart, clean shutdown, and first-run token generation.
 
@@ -298,6 +299,18 @@ async function main() {
     const guideAdd = await api('POST', '/api/op', { body: { type: 'add', name: 'lantern', description: 'a paper lantern' }, headers: { 'x-world-actor': 'guide' } });
     check('x-world-actor: guide -> createdBy:guide', guideAdd.json?.object?.createdBy === 'guide', guideAdd.json?.object?.createdBy);
 
+    // spacing: summoning the same big thing at the same spot again must not stack it into a wall
+    const portalA = await api('POST', '/api/op', { body: { type: 'add', name: 'portal', description: 'a violet portal', position: [0.5, 0, -2.6] } });
+    const portalB = await api('POST', '/api/op', { body: { type: 'add', name: 'portal', description: 'another violet portal', position: [0.6, 0, -2.6] } });
+    const pa = portalA.json?.object?.position || [], pb = portalB.json?.object?.position || [];
+    const pgap = Math.hypot(pa[0] - pb[0], pa[2] - pb[2]);
+    check('a crowded add is nudged outward (portals >= 2 m apart)', portalA.status === 200 && portalB.status === 200
+      && pgap >= 2 && pb[2] < 0, `${JSON.stringify(pa)} ${JSON.stringify(pb)} gap ${pgap.toFixed(2)}`);
+    const portalC = await api('POST', '/api/op', { body: { type: 'add', name: 'portal', description: 'a third portal' } });
+    const pc = portalC.json?.object?.position || [];
+    check('a spawned portal keeps 2 m from the others', [pa, pb].every((q) => Math.hypot(q[0] - pc[0], q[2] - pc[2]) >= 2), JSON.stringify(pc));
+    for (const r of [portalA, portalB, portalC]) if (r.json?.object?.id) await api('POST', '/api/op', { body: { type: 'remove', id: r.json.object.id } });
+
     const mv = await api('POST', '/api/op', { body: { type: 'move', id: o1?.id, position: [2, 20, -3], rotationY: 1 } });
     check('move -> 200 and clamps y to 8', mv.status === 200 && JSON.stringify(mv.json?.object?.position) === JSON.stringify([2, 8, -3]), mv.text.slice(0, 200));
     const mvBad = await api('POST', '/api/op', { body: { type: 'move', id: 'o999', position: [0, 0, 0] } });
@@ -369,6 +382,43 @@ async function main() {
     }
 
     // ---------------------------------------------------------------- brain + say
+    section('long-poll events (for clients that cannot stream)');
+    const pollNoAuth = await api('GET', '/api/events/poll', { tok: null });
+    check('poll without a token -> 401', pollNoAuth.status === 401, pollNoAuth.status);
+    const p0 = await api('GET', '/api/events/poll');
+    check('poll with no `from` -> {snapshot, last}', p0.status === 200 && Array.isArray(p0.json?.snapshot?.objects) && Number.isInteger(p0.json?.last), p0.text.slice(0, 160));
+    const pFuture = await api('GET', '/api/events/poll?from=999999999');
+    check('poll from an unknown future id (a server restart) -> snapshot', !!pFuture.json?.snapshot, pFuture.text.slice(0, 120));
+    const pNow = await api('GET', `/api/events/poll?from=${p0.json?.last}&wait=0`);
+    check('poll from the latest id, no wait -> {events:[], last}', pNow.status === 200 && Array.isArray(pNow.json?.events) && pNow.json.events.length === 0 && pNow.json.last >= p0.json?.last, pNow.text.slice(0, 160));
+    let tPoll = Date.now();
+    const held = api('GET', `/api/events/poll?from=${pNow.json?.last}&wait=15000`);
+    await sleep(300);
+    await api('POST', '/api/say', { body: { text: 'A long poll hears me.', from: 'mcp' } });
+    const heldRes = await held;
+    const heldMs = Date.now() - tPoll;
+    const heardEv = heldRes.json?.events?.find((e) => e.event === 'chat' && /long poll hears me/.test(e.data?.text || ''));
+    check('a waiting poll resolves as soon as something is broadcast', heldRes.status === 200 && !!heardEv && heldMs < 3000 && heldMs >= 250, `${heldMs} ms ${heldRes.text.slice(0, 160)}`);
+    check('poll events carry {id, event, data} and `last` is the newest id', Number.isInteger(heardEv?.id) && heldRes.json.last === heldRes.json.events.at(-1).id, heldRes.text.slice(0, 160));
+    tPoll = Date.now();
+    const idle = await api('GET', `/api/events/poll?from=${heldRes.json?.last}&wait=600`);
+    check('an idle poll returns empty after `wait`', idle.status === 200 && idle.json?.events?.length === 0 && Date.now() - tPoll >= 550, `${Date.now() - tPoll} ms`);
+    if (scripted) {
+      // A whole chat turn over polling only: the user line, status and the guide reply.
+      let cursor = idle.json?.last;
+      const pc = await api('POST', '/api/chat', { body: { text: 'what is around me', from: 'phone', brain: 'scripted' } });
+      const got = [];
+      const until = Date.now() + 10000;
+      while (Date.now() < until && !got.some((e) => e.event === 'chat' && e.data?.replyTo === pc.json?.id)) {
+        const r = await api('GET', `/api/events/poll?from=${cursor}&wait=5000`);
+        if (r.json?.snapshot) break;
+        got.push(...(r.json?.events || []));
+        cursor = r.json?.last ?? cursor;
+      }
+      check('a chat turn is fully visible over polling (user line, status, guide reply)', got.some((e) => e.event === 'chat' && e.data?.id === pc.json?.id)
+        && got.some((e) => e.event === 'status') && got.some((e) => e.event === 'chat' && e.data?.replyTo === pc.json?.id), got.map((e) => e.event).join(','));
+    }
+
     section('brain picker and say');
     mark = sse.mark();
     const setB = await api('POST', '/api/brain', { body: { brain: 'scripted' } });

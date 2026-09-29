@@ -39,6 +39,7 @@ Public HTTPS: cloudflared quick tunnel → :8787
 | `GET /api/health` | — (no token needed) | `{ok:true, brains:{ollama:bool, claude:bool, scripted:true}, stt:{whisper:bool}, assets:[names]}` |
 | `GET /api/world` | — | `World` |
 | `GET /api/events?t=` | SSE | events below; the first event is always `snapshot` |
+| `GET /api/events/poll?from=<id>&wait=<ms>` | `from`: the last event id seen; `wait` ≤ 20000 | `{events:[{id, event, data}], last}`, or `{snapshot, status, last}` when `from` is missing, older than the buffer (last ~200 events) or from before a server restart. With `wait`, an empty answer is held until the next broadcast. *Addition (server-core, after the E2E run): the polling twin of `/api/events` for clients behind a proxy that won't stream. Nothing existing changes.* |
 | `POST /api/chat` | `{text, from:'phone'\|'xr'\|'desktop', brain?:'ollama'\|'claude'\|'scripted'}` | `202 {id}`; the reply arrives over SSE |
 | `POST /api/op` | `Op` | `200 {ok:true, world}` or `400 {error}`. For direct manipulation (the user grabbed and moved something) |
 | `POST /api/brain` | `{brain}` | `{brain}`: sets the default brain |
@@ -69,6 +70,7 @@ Op    = { type:'add', name, description, position?, scale?, rotationY? }   // se
 ```
 - Server-side limits (clamp, don't crash): at most **40 objects** (adding more rejects with `error`), position x/z in [-15, 15] and y in [0, 8], scale in [0.1, 4], name ≤ 60 chars, description ≤ 300 chars.
 - Default spawn: when `add` has no position, place it 1.5–3 m in front of the origin at y 0–1.5 in a spread arc, not overlapping the last object.
+- Spacing (addition): an `add` whose position crowds an existing object (closer than 1.2 × the combined radii, or 2 m between two large things such as portals and floating islands) is nudged outward along an arc in front of the origin. `move` and asset swaps keep their exact position.
 - The world persists to `.data/world.json` (gitignored). `clear` resets objects only.
 - Exports: `createWorld({file})` → `{ get(), apply(op) → {ok, world, error?}, describe() → string, on(fn) }`. `describe()` is a short natural-language summary for brains.
 
@@ -158,10 +160,11 @@ Her words: "the looks can be swapped depending on what I say to the voice agent 
 - Hackathon integration: another Claude Code session (building her hackathon app) will use Dreamspace as a frontend surface. Keep the HTTP/SSE/MCP API stable and documented; coordinate through Rae.
 
 ## Hackathon surface (DuploCloud hack day, 2026-09-29; requested by the hackathon-app Claude session, `projects-d9`)
+**Her framing:** Dreamspace is a separate, game-like world. When connected, the agent in it is **the Claude mobile app in hands-free voice mode**, driving the world through the `/mcp/<token>` connector. So the MCP tools are the primary control surface, and the built-in brains are the offline or local fallback. Plaud → claude.ai transcripts and Obsidian are the other session's domain, not Dreamspace's.
 Dreamspace is one surface of her "voice-agent metaharness": one Claude across mobile voice, claude.ai, Claude Code, Band.ai and Dreamspace, sharing a hosted **contextlog** MCP. Today she has AirPods + web, no headset.
 - **Stable API:** don't break the `/api/*` + SSE + `/mcp/<token>` shapes. `scripts/up.mjs` writes the current public base URL (no token) to `.data/public-url` on every start. The token is stable across restarts (`.env.local`).
 - **Spatial voice (a):** an optional path. `POST /api/tts {text}` renders speech locally with macOS `say` (convert to m4a/wav with `afconvert`) and returns an audio URL/bytes. The client plays it through WebAudio: `PannerNode` (`panningModel:'HRTF'`) at the guide's world position, updated every frame, plus a subtle delay/echo chain. It has a toggle (on by default when supported), and plain `speechSynthesis` is the fallback. The guide's light pulses and moves with the voice.
-- **While you were away (b):** env `CONTEXTLOG_URL` + `CONTEXTLOG_TOKEN`. On a session's first connect, the server reads a `context_state`-style summary, and the guide greets her with it in ≤ 2 sentences. Stubbed and silent until configured.
+- **No greeting / no context pull (her correction, 2026-09-29):** Dreamspace is separate, like a game. It does NOT read contextlog or greet with a "while you were away" summary.
 - **Idea capture (c):** when she proposes a change or idea, the guide says "logged that as an idea" and the server POSTs `{text, source:'dreamspace', ts}` to contextlog `/api/{token}/ideas` (see Contextlog wiring). Otherwise it appends to `.data/ideas.jsonl`. `GET /api/ideas` lists them. Brains get an `idea` op, or equivalent: `{type:'idea', text}`.
 - **Event mirror:** when `CONTEXTLOG_EVENTS_URL` is set, `op`/`chat` events are forwarded (batched, best-effort, never blocking).
 - **Demo safety (d, hard rule, all brains):** the guide never raises health, disability, benefits or income topics. The persona rule is backed by a server-side reply filter that swaps any such reply for a gentle redirect. On-topic: the sponsors, Dreamspace, voice-agent infrastructure.
@@ -170,7 +173,6 @@ Dreamspace is one surface of her "voice-agent metaharness": one Claude across mo
 - Base `CONTEXTLOG_URL` (default `http://127.0.0.1:7779`; a public Vultr `https://<ip>.sslip.io` URL comes later). The token is **not copied** into this repo: the server reads
   `CONTEXTLOG_TOKEN` at runtime from `CONTEXTLOG_ENV_FILE` (default `../claude-app-contextational-analysis/.env.local`), or from the env if set. It is never logged, never sent to clients, never committed.
   The token goes in the URL **path**.
-- `GET  {base}/api/{token}/while-away?surface=spatial` → `{now, since, ambient_notes:[{ts,title,text,location,people}], queued_ideas:[], guidance}`. Already demo-safe server-side, and our filter still applies. Used for the first-connect greeting.
 - `POST {base}/api/{token}/ideas {text, source:'rae'|'claude-agreed', surface:'spatial', context}` → `{ok, id, say}`. The guide speaks `say`. On failure, fall back to `.data/ideas.jsonl`.
 - `POST {base}/api/{token}/ambient {text, title, source:'dreamspace', tags:['world-event']}`. Keep it **sparse**: batched summaries (e.g. "Rae toured 3 worlds and summoned a portal"), at most one per few minutes, never every op.
 - MCP alternative: `POST {base}/mcp/{token}`, tools `while_away`, `idea_log`, `ideas_list`, `context_ping`, `ambient_ingest` (surface `'spatial'`).

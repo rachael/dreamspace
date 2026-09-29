@@ -11,6 +11,9 @@
 //
 // Limits (clamp, don't crash): 40 objects, x/z in [-15, 15], y in [0, 8], scale in [0.1, 4],
 // name <= 60 chars, description <= 300 chars, <= 24 parts per `parts` asset.
+// Spacing: an add without a position spawns on a clear spot of a front arc; an add whose position crowds an
+// existing object (closer than 1.2 x the combined radii, or 2 m between two large things such as portals) is
+// nudged outward along an arc. Moves (she grabbed it) and asset swaps keep their exact place.
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync, copyFileSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -221,38 +224,111 @@ export function describeWorld(world) {
   return `${head} ${objs.length} object${objs.length === 1 ? '' : 's'} (max ${LIMITS.maxObjects}): ${items.join('; ')}.`;
 }
 
+// ------------------------------------------------------------------------------------------------ spacing
+
+// Rough ground-plane radius (m, at scale 1) of each archetype as the viewer draws it. A portal is ~1.5 m wide.
+const ARCH_RADIUS = {
+  crystal: 0.3, 'crystal-cluster': 0.5, 'floating-island': 1.1, portal: 0.8, lantern: 0.25, 'tree-glow': 0.7,
+  'mushroom-glow': 0.4, 'rune-stone': 0.4, orb: 0.3, planet: 0.9, moon: 0.6, spaceship: 0.9, obelisk: 0.45,
+  'waterfall-light': 0.8, 'butterfly-swarm': 0.6, wisp: 0.2,
+};
+// Big things that must keep at least LARGE_GAP m (centre to centre) from each other.
+const LARGE = new Set(['portal', 'floating-island', 'planet', 'spaceship', 'waterfall-light', 'tree-glow']);
+const LARGE_GAP = 2.0;
+const GAP_FACTOR = 1.2; // keep centres at least 1.2 x the combined radii apart
+
+function assetRadius(asset) {
+  if (asset?.type === 'archetype') return ARCH_RADIUS[asset.archetype] ?? 0.4;
+  if (asset?.type === 'parts' && Array.isArray(asset.parts) && asset.parts.length) {
+    let r = 0;
+    for (const p of asset.parts) r = Math.max(r, Math.hypot(p.position[0], p.position[2]) + Math.max(p.size[0], p.size[2]) / 2);
+    return clamp(r, 0.2, 2);
+  }
+  return 0.6; // glb and anything else
+}
+const radiusOf = (asset, scale) => assetRadius(asset) * (scale || 1);
+const isLarge = (asset, scale) => (asset?.type === 'archetype' && LARGE.has(asset.archetype)) || radiusOf(asset, scale) >= 0.9;
+
+/**
+ * How much room a candidate spot (x, y, z) leaves against every existing object: the smallest (distance - required)
+ * over the objects at a similar height (a moon high in the sky doesn't crowd a crystal on the ground).
+ * Required = max(1.2 x combined radii, 2 m when both are large). >= 0 means clear.
+ */
+function clearanceAt(objects, x, y, z, asset, scale) {
+  const r = radiusOf(asset, scale);
+  const big = isLarge(asset, scale);
+  let worst = Infinity;
+  for (const o of objects) {
+    const p = o.position;
+    const ro = radiusOf(o.asset, o.scale);
+    if (Math.abs(p[1] - y) > 1.6 + r + ro) continue;
+    let need = GAP_FACTOR * (r + ro);
+    if (big && isLarge(o.asset, o.scale)) need = Math.max(need, LARGE_GAP);
+    const gap = Math.hypot(p[0] - x, p[2] - z) - need;
+    if (gap < worst) worst = gap;
+  }
+  return worst;
+}
+
+/**
+ * A requested spot that crowds something already there is pushed outward along an arc around the origin:
+ * 1.8 m steps, alternating right and left, then a ring further back (depth -2 .. -5 m and beyond), until it's clear.
+ * Returns the original position when it is already clear.
+ */
+function clearSpot(objects, position, asset, scale) {
+  const [x0, y, z0] = position;
+  if (clearanceAt(objects, x0, y, z0, asset, scale) >= 0) return position;
+  const d0 = Math.hypot(x0, z0);
+  const r0 = clamp(d0, 2, 12);
+  const a0 = d0 < 0.4 ? 0 : Math.atan2(x0, -z0); // bearing from the start view (0 = ahead, + = right)
+  // Candidates: rings every 1.5 m further out, 1.8 m arc steps alternating right/left. Cheapest clear one wins:
+  // small swings first, then a step back, and anything beside or behind her only as a last resort.
+  const cands = [];
+  for (let ring = 0; ring <= 6; ring++) {
+    const rr = r0 + 1.5 * ring;
+    const step = 1.8 / rr;
+    for (let k = 0; k <= 12; k++) {
+      for (const side of k === 0 ? [0] : [1, -1]) {
+        const a = a0 + side * k * step;
+        if (Math.abs(a) > (120 * Math.PI) / 180) continue;
+        const cost = Math.abs(a - a0) / (Math.PI / 4) + ring * 0.7 + (Math.abs(a) > Math.PI / 2 ? 3 : 0) + k * 0.001 + (side < 0 ? 0.0005 : 0);
+        cands.push({ a, rr, cost });
+      }
+    }
+  }
+  cands.sort((p, q) => p.cost - q.cost);
+  let roomiest = null;
+  for (const { a, rr } of cands) {
+    const cand = clampPosition([rr * Math.sin(a), y, -rr * Math.cos(a)]);
+    const c = clearanceAt(objects, cand[0], y, cand[2], asset, scale);
+    if (c >= 0) return cand;
+    if (!roomiest || c > roomiest.c) roomiest = { pos: cand, c };
+  }
+  return roomiest ? roomiest.pos : position;
+}
+
 // ------------------------------------------------------------------------------------------------ spawn
 
 // Default spawn: candidates on a gentle arc in front of the origin (the user starts at the origin facing -z),
-// 1.6-3.0 m out and up to +-72 degrees. The cheapest candidate that clears every existing object wins:
-// centre and ~2.3 m first, then outwards, so a series of adds fills a spread arc instead of a pile.
-function footprint(scale) { return 0.4 * (scale || 1); }
-
-function spawnPosition(objects, { scale = 1, floating = false, rand = Math.random } = {}) {
+// 1.6-5 m out and up to +-72 degrees. The cheapest candidate that clears every existing object (by the spacing
+// rules above) wins: centre and ~2.3 m first, then outwards, so a series of adds fills a spread arc, not a pile.
+function spawnPosition(objects, { asset = null, scale = 1, floating = false, rand = Math.random } = {}) {
   const extra = Math.max(0, scale - 1) * 0.6; // big things sit a little further back
-  const clearance = (x, z) => {
-    let worst = Infinity;
-    for (const o of objects) {
-      const p = o.position;
-      const gap = Math.hypot(p[0] - x, p[2] - z) - (footprint(scale) + footprint(o.scale) + 0.12);
-      if (gap < worst) worst = gap;
-    }
-    return worst;
-  };
-  let best = null, bestCost = Infinity, roomiest = null;
-  for (let r = 1.6; r <= 3.001; r += 0.28) {
+  const y = floating ? 0.9 + rand() * 0.5 : 0;
+  let best = null, bestCost = Infinity;
+  for (let r = 1.6; r <= 5.001; r += 0.28) {
     for (let deg = -72; deg <= 72; deg += 6) {
       const a = (deg * Math.PI) / 180, rr = r + extra;
       const x = rr * Math.sin(a), z = -rr * Math.cos(a);
-      const c = clearance(x, z);
+      // leave a little slack for the jitter below
+      const c = clearanceAt(objects, x, y, z, asset, scale) - 0.06;
       const cost = (deg / 45) ** 2 + ((r - 2.3) / 0.7) ** 2 + rand() * 0.2;
       if (c >= 0 && cost < bestCost) { best = { x, z }; bestCost = cost; }
-      if (!roomiest || c > roomiest.c) roomiest = { x, z, c };
     }
   }
-  const pick = best || roomiest;
-  const y = floating ? 0.9 + rand() * 0.5 : 0;
-  const pos = clampPosition([pick.x + (rand() - 0.5) * 0.08, y, pick.z + (rand() - 0.5) * 0.08]);
+  let pos;
+  if (best) pos = clampPosition([best.x + (rand() - 0.5) * 0.08, y, best.z + (rand() - 0.5) * 0.08]);
+  else pos = clearSpot(objects, clampPosition([0, y, -2.3 - extra]), asset, scale); // a crowded front: go wider
   const rotationY = normAngle(Math.atan2(-pos[0], -pos[2])); // face the origin, where the user starts
   return { position: pos, rotationY };
 }
@@ -398,9 +474,12 @@ export function createWorld({ file = null, log = (...a) => console.log(...a), ra
       let rotationY = num(op.rotationY);
       const spawned = !position;
       if (spawned) {
-        const s = spawnPosition(w.objects, { scale, floating: isFloating(asset), rand });
+        const s = spawnPosition(w.objects, { asset, scale, floating: isFloating(asset), rand });
         position = s.position;
         if (rotationY === null) rotationY = s.rotationY;
+      } else if (!meta.replaces && !meta.exact) {
+        // A requested spot that crowds an existing object is nudged outward (an asset swap keeps its exact place).
+        position = clearSpot(w.objects, position, asset, scale);
       }
       if (rotationY === null) rotationY = Math.atan2(-position[0], -position[2]);
       const createdBy = meta.createdBy === 'user' || meta.createdBy === 'guide' ? meta.createdBy

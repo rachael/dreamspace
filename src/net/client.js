@@ -20,6 +20,13 @@
 // Transport: the live stream is read with fetch() + a streaming body (sends the token as a header AND as ?t=, sees
 // HTTP status codes, and notices the server's 15 s ": ping" comments, so a dead tunnel is detected). It falls back
 // to EventSource where streaming fetch is missing, and switches transport by itself if one of them stalls.
+// Third transport, short polling: some tunnels (Cloudflare quick tunnels) send the SSE headers but hold the whole body
+// back, so neither streaming transport ever sees a byte. After two stalls the client polls instead:
+//   GET /api/events/poll?from=<cursor>&client=<phone|xr|desktop>   (cursor = last SSE `id:` seen; omitted the first time)
+//   → {cursor, events:[{id, event, data}], reset?}  (also accepts a bare array; `type`/`name` for `event`; `last`/`lastId`/`next` for `cursor`)
+// Every returned event goes through the same dispatch() as SSE. If that endpoint isn't there (anything but 2xx JSON),
+// it polls GET /api/world instead, which keeps objects and mood in sync (not chat/status/creation). Both the SSE stream
+// and the poll endpoint are retried in the background every 60 s; a working stream switches back to SSE.
 // No top-level window/document access, so the module also imports in Node for tests.
 
 const TOKEN_KEY = 'dreamspace.token';
@@ -150,15 +157,16 @@ export async function apiRequest(method, path, opts = {}) {
 // ---------------------------------------------------------------------------------------------------------------
 // SSE parsing (per the HTML spec's event-stream format), fed with decoded text chunks.
 
-function createSseParser(onEvent, onComment) {
+function createSseParser(onEvent, onComment, onId) {
   let buf = '';
   let event = '';
   let data = '';
   let hasData = false;
   let pendingCR = false;
+  let id = null;          // last event id (persists across events, as in the spec)
   function line(l) {
     if (l === '') {
-      if (hasData) onEvent(event || 'message', data.endsWith('\n') ? data.slice(0, -1) : data);
+      if (hasData) onEvent(event || 'message', data.endsWith('\n') ? data.slice(0, -1) : data, id);
       event = ''; data = ''; hasData = false;
       return;
     }
@@ -169,7 +177,8 @@ function createSseParser(onEvent, onComment) {
     if (value[0] === ' ') value = value.slice(1);
     if (field === 'event') event = value;
     else if (field === 'data') { data += value + '\n'; hasData = true; }
-    // 'id' and 'retry' are not used by this app.
+    else if (field === 'id' && !value.includes('\0')) { id = value; onId?.(value); }
+    // 'retry' is not used by this app.
   }
   return function feed(chunk) {
     if (pendingCR && chunk[0] === '\n') chunk = chunk.slice(1);
@@ -202,15 +211,19 @@ function isObj(v) { return v !== null && typeof v === 'object' && !Array.isArray
 /**
  * connect(callbacks & options) → client
  * Options (all optional): base (URL prefix, default same origin), from ('phone'|'xr'|'desktop' or a function returning one),
- * transport ('auto'|'fetch'|'eventsource'), maxBackoffMs (30000), stallMs (20000: no snapshot after connecting → retry),
- * livenessMs (45000: armed once a ": ping" has been seen), autoConnect (true).
+ * transport ('auto'|'fetch'|'eventsource'|'poll'), maxBackoffMs (30000), stallMs (12000: no snapshot after connecting → retry;
+ * the server sends the snapshot right after the headers, so a healthy stream never gets near it),
+ * livenessMs (45000: armed once a ": ping" has been seen), pollMs (1500: poll interval once polling),
+ * sseRetryMs (60000: how often a polling client tries the stream again), autoConnect (true).
  */
 export function connect(opts = {}) {
   const cb = opts;
   const base = opts.base || '';
   const maxBackoff = opts.maxBackoffMs ?? 30000;
-  const stallMs = opts.stallMs ?? 20000;
+  const stallMs = opts.stallMs ?? 12000;
   const livenessMs = opts.livenessMs ?? 45000;
+  const pollMs = opts.pollMs ?? 1500;
+  const sseRetryMs = opts.sseRetryMs ?? 60000;
   let transport = opts.transport || 'auto';
   let from = opts.from || defaultFrom;
 
@@ -232,6 +245,16 @@ export function connect(opts = {}) {
   let resyncTimer = null;
   let resyncBusy = false;
   let resyncAgain = false;
+  // Polling fallback (see the header comment).
+  let pollMode = false;
+  let pollTimer = null;
+  let pollCursor = null;      // cursor for /api/events/poll?from=
+  let lastEventId = null;     // last SSE `id:` seen, the first cursor when switching to polling
+  let pollEndpoint = 'unknown'; // 'unknown' | 'events' (the poll endpoint answers) | 'world' (it doesn't: poll /api/world)
+  let needSnapshot = false;
+  let lastWorldJson = '';
+  let probeTimer = null;
+  let probe = null;           // {abort()} for the background stream check
 
   const now = () => Date.now();
 
@@ -254,6 +277,7 @@ export function connect(opts = {}) {
       && typeof Response === 'function' && 'body' in Response.prototype;
   }
   function usedTransport() {
+    if (pollMode || transport === 'poll') return 'poll';
     if (transport === 'eventsource') return 'eventsource';
     if (transport === 'fetch') return 'fetch';
     if (transport === 'auto-eventsource') return typeof EventSource === 'function' ? 'eventsource' : 'fetch';
@@ -388,6 +412,7 @@ export function connect(opts = {}) {
   function teardown() {
     clearTimeout(stallTimer); stallTimer = null;
     clearInterval(liveTimer); liveTimer = null;
+    clearTimeout(pollTimer); pollTimer = null;
     const c = current; current = null;
     if (c) { try { c.abort(); } catch { /* already closed */ } }
   }
@@ -399,6 +424,12 @@ export function connect(opts = {}) {
     const myGen = ++gen;
     token = getToken();
     if (!token) { authFailed(true); return; }
+    if (pollMode) {
+      if (state !== 'open') setState(attempt === 0 && state !== 'reconnecting' ? 'connecting' : 'reconnecting');
+      pollTimer = setTimeout(() => pollOnce(myGen), 0);
+      scheduleProbe();
+      return;
+    }
     setState(attempt === 0 && state !== 'reconnecting' ? 'connecting' : 'reconnecting');
     pingSeen = false;
     lastActivity = now();
@@ -438,7 +469,7 @@ export function connect(opts = {}) {
         if (myGen !== gen) return;
         lastActivity = now();
         if (/^ping\b/i.test(text)) pingSeen = true; // the server keeps pinging: silence now means a dead link
-      });
+      }, (id) => { if (myGen === gen) lastEventId = id; });
       const reader = res.body.getReader();
       const dec = new TextDecoder();
       try {
@@ -465,7 +496,12 @@ export function connect(opts = {}) {
       failed(myGen, err?.message || 'EventSource failed'); return;
     }
     current = { abort: () => es.close() };
-    for (const name of EVENTS) es.addEventListener(name, (e) => dispatch(name, e.data, myGen));
+    for (const name of EVENTS) {
+      es.addEventListener(name, (e) => {
+        if (myGen === gen && e.lastEventId) lastEventId = e.lastEventId;
+        dispatch(name, e.data, myGen);
+      });
+    }
     es.onmessage = (e) => dispatch('message', e.data, myGen);
     // The server's own "event: error" and EventSource's connection error share one name: data tells them apart.
     es.addEventListener('error', (e) => {
@@ -486,12 +522,186 @@ export function connect(opts = {}) {
   function stalled(myGen) {
     if (myGen !== gen || closed || state === 'open') return;
     stalls++;
-    // Something between us and the server is buffering the stream. Try the other transport next time.
-    if ((transport === 'auto' || transport === 'auto-eventsource') && stalls >= 2) {
+    // Something between us and the server is buffering the stream: try the other streaming transport once, then poll.
+    if (transport === 'auto' || transport === 'auto-eventsource') {
+      if (stalls >= 2) { enterPoll('the event stream is held back (tunnel buffering?)'); return; }
       transport = usedTransport() === 'fetch' ? 'auto-eventsource' : 'auto';
+    } else if (stalls === 2) {
+      reportError({ message: 'Live updates are being held up by the network or tunnel; still trying.', source: 'network' });
     }
-    if (stalls === 2) reportError({ message: 'Live updates are being held up by the network or tunnel; still trying.', source: 'network' });
     failed(myGen, 'no snapshot (stream buffered?)');
+  }
+
+  // ---- polling fallback ---------------------------------------------------------------------------------------
+  const POLL_KEY = 'dreamspace.poll';
+  function rememberPoll(on) {
+    try { const s = store(); if (s) on ? s.setItem(POLL_KEY, String(now())) : s.removeItem(POLL_KEY); } catch { /* */ }
+  }
+  function recentlyPolled() {
+    try { const at = Number(store()?.getItem(POLL_KEY)); return at > 0 && now() - at < 15 * 60000; } catch { return false; }
+  }
+
+  function enterPoll(reason) {
+    if (closed || pollMode) return;
+    console.info(`[net] switching to polling: ${reason}`);
+    pollMode = true;
+    pollEndpoint = 'unknown';
+    pollCursor = lastEventId;
+    rememberPoll(true);
+    teardown();
+    gen++;
+    attempt = 0;
+    open();
+  }
+
+  function leavePoll() {
+    if (!pollMode || closed) return;
+    console.info('[net] the event stream flows again: back to live streaming');
+    pollMode = false;
+    rememberPoll(false);
+    stopProbe();
+    stalls = 0;
+    transport = opts.transport && opts.transport !== 'poll' ? opts.transport : 'auto';
+    reconnectNow();
+  }
+
+  const num = (v) => (v === null || v === undefined || v === '' ? NaN : Number(v));
+  function pollDelay() {
+    const hidden = doc?.visibilityState === 'hidden';
+    return (hidden ? Math.max(pollMs, 10000) : pollMs) * (0.85 + Math.random() * 0.3);
+  }
+
+  async function fetchWorld(myGen) {
+    const r = await apiRequest('GET', '/api/world', { base, timeout: 10000, retries: 0 });
+    if (myGen !== gen || closed) return 'stale';
+    if (r.status === 401 || r.status === 403) { authFailed(); return 'stale'; }
+    if (!r.ok || !isObj(r.data)) { failed(myGen, `poll: ${r.error || 'bad world'}`); return 'stale'; }
+    const json = JSON.stringify(r.data);
+    if (json !== lastWorldJson || !world) { lastWorldJson = json; dispatch('snapshot', r.data, myGen); }
+    return 'ok';
+  }
+
+  async function pollOnce(myGen) {
+    if (myGen !== gen || closed || !pollMode) return;
+    let fetchedWorld = false;
+    if (!world || needSnapshot) {
+      if (await fetchWorld(myGen) !== 'ok') return;
+      needSnapshot = false;
+      fetchedWorld = true;
+    }
+    if (pollEndpoint !== 'world') {
+      const q = `from=${encodeURIComponent(pollCursor ?? '')}&client=${encodeURIComponent(fromValue())}`;
+      const r = await apiRequest('GET', `/api/events/poll?${q}`, { base, timeout: 10000, retries: 0 });
+      if (myGen !== gen || closed) return;
+      if (r.status === 401 || r.status === 403) { authFailed(); return; }
+      if (r.ok && (isObj(r.data) || Array.isArray(r.data))) {
+        pollEndpoint = 'events';
+        takePoll(r.data, myGen);
+        if (myGen !== gen || closed) return;
+      } else if (r.status === 0 || RETRYABLE.has(r.status) || (pollEndpoint === 'events' && r.status >= 500)) {
+        failed(myGen, `poll: ${r.error}`);
+        return;
+      } else {
+        // Not there (yet): 404, or something that isn't JSON. Keep the world in sync; it's checked again every sseRetryMs.
+        if (pollEndpoint === 'unknown') console.info(`[net] no /api/events/poll (${r.status}); polling /api/world (no chat/status until the stream or that endpoint works)`);
+        pollEndpoint = 'world';
+      }
+    }
+    if (pollEndpoint === 'world' && !fetchedWorld) {
+      if (await fetchWorld(myGen) !== 'ok') return;
+    }
+    attempt = 0;
+    failuresReported = false;
+    lastActivity = now();
+    setState('open');
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(() => pollOnce(myGen), pollDelay());
+  }
+
+  // Feed one /api/events/poll answer into dispatch(), deduplicated by event id.
+  function takePoll(body, myGen) {
+    const list = (Array.isArray(body) ? body : Array.isArray(body.events) ? body.events : []).filter(isObj);
+    const next = Array.isArray(body) ? undefined : (body.cursor ?? body.last ?? body.lastId ?? body.next);
+    const prev = pollCursor;
+    const restarted = (!Array.isArray(body) && body.reset === true)
+      || (Number.isFinite(num(next)) && Number.isFinite(num(prev)) && num(next) < num(prev)); // server restarted: ids start over
+    let events = list;
+    if (prev === null || restarted) {
+      // No shared history yet: only what follows a snapshot in this answer is safe to apply (anything else may be backlog).
+      let i = -1;
+      list.forEach((ev, k) => { if ((ev.event ?? ev.type ?? ev.name) === 'snapshot') i = k; });
+      if (i >= 0) events = list.slice(i);
+      else if (prev === null) events = [];
+      else needSnapshot = true;
+    }
+    let lastId = null;
+    for (const ev of events) {
+      const id = ev.id;
+      if (id !== undefined && id !== null) lastId = id;
+      if (prev !== null && !restarted && Number.isFinite(num(id)) && Number.isFinite(num(prev)) && num(id) <= num(prev)) continue;
+      const name = ev.event ?? ev.type ?? ev.name ?? 'message';
+      dispatch(name, 'data' in ev ? ev.data : ev, myGen);
+      if (myGen !== gen || closed) return;
+    }
+    if (lastId === null && list.length) { const l = list[list.length - 1].id; if (l !== undefined && l !== null) lastId = l; }
+    const cursor = next ?? lastId;
+    if (cursor !== undefined && cursor !== null) { pollCursor = cursor; lastEventId = String(cursor); }
+  }
+
+  // Every sseRetryMs while polling: see whether the stream gets through now; also re-ask for the poll endpoint.
+  function stopProbe() {
+    clearTimeout(probeTimer); probeTimer = null;
+    const p = probe; probe = null;
+    if (p) { try { p.abort(); } catch { /* */ } }
+  }
+  function scheduleProbe() {
+    if (closed || !pollMode || transport === 'poll' || probeTimer || probe) return;
+    probeTimer = setTimeout(runProbe, sseRetryMs);
+  }
+  function runProbe() {
+    probeTimer = null;
+    if (closed || !pollMode) return;
+    if (pollEndpoint === 'world') pollEndpoint = 'unknown';
+    if (doc?.visibilityState === 'hidden' || !token) { scheduleProbe(); return; }
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      const p = probe; probe = null;
+      if (p) { try { p.abort(); } catch { /* */ } }
+      if (closed || !pollMode) return;
+      if (ok) leavePoll(); else scheduleProbe();
+    };
+    const timer = setTimeout(() => finish(false), stallMs);
+    const url = eventsUrl();
+    if (canStreamFetch()) {
+      const ctrl = new AbortController();
+      probe = { abort: () => ctrl.abort() };
+      (async () => {
+        try {
+          const res = await fetch(url, { headers: { accept: 'text/event-stream', 'x-world-token': token }, cache: 'no-store', signal: ctrl.signal });
+          if (!res.ok || !res.body || !(res.headers.get('content-type') || '').includes('text/event-stream')) { finish(false); return; }
+          let got = false;
+          const feed = createSseParser((name) => { if (name === 'snapshot') got = true; }, () => {});
+          const reader = res.body.getReader();
+          const dec = new TextDecoder();
+          while (!done) {
+            const { value, done: end } = await reader.read();
+            if (end) break;
+            feed(dec.decode(value, { stream: true }));
+            if (got) { finish(true); return; }
+          }
+          finish(false);
+        } catch { finish(false); }
+      })();
+    } else if (typeof EventSource === 'function') {
+      let es;
+      try { es = new EventSource(url); } catch { finish(false); return; }
+      probe = { abort: () => es.close() };
+      es.addEventListener('snapshot', () => finish(true));
+      es.addEventListener('error', (e) => { if (typeof e?.data !== 'string') finish(false); });
+    } else finish(false);
   }
 
   function failed(myGen, reason) {
@@ -543,6 +753,10 @@ export function connect(opts = {}) {
     if (state !== 'open' || away > 20000) reconnectNow();
   }
   function onOnline() { if (state !== 'open') reconnectNow(); }
+  if (transport === 'poll' || (transport === 'auto' && recentlyPolled())) {
+    // Polling was needed on this device a moment ago (same tunnel): start there; the background check returns to SSE.
+    pollMode = true;
+  }
   function onPageShow(e) { if (e && e.persisted) reconnectNow(); }
   doc?.addEventListener?.('visibilitychange', onVisibility);
   win?.addEventListener?.('online', onOnline);
@@ -620,6 +834,7 @@ export function connect(opts = {}) {
       clearTimeout(reconnectTimer);
       clearTimeout(resyncTimer);
       teardown();
+      stopProbe();
       gen++;
       doc?.removeEventListener?.('visibilitychange', onVisibility);
       win?.removeEventListener?.('online', onOnline);

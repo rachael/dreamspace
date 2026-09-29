@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Dreamspace server: one process, one port, zero dependencies beyond node built-ins.
 //   - static files from the repo root (no-store caching, like serve/serve.mjs; secrets and server code are never served)
-//   - the JSON API under /api/* and Server-Sent Events at /api/events (see docs/CONTRACT.md)
+//   - the JSON API under /api/* and Server-Sent Events at /api/events, plus its long-poll twin /api/events/poll
+//     for clients behind proxies that won't stream (see docs/CONTRACT.md)
 //   - the remote MCP endpoint for a claude.ai custom connector at /mcp/<token>
 //   - brains (server/brains), asset providers (server/assets), vibe mode (server/vibe.mjs), loaded with
 //     dynamic imports so the server still boots, and says so politely, when one of them is missing or broken
@@ -463,8 +464,29 @@ export async function startServer(opts = {}) {
       if (c.res.writableLength > 8 * 1024 * 1024) { log(`sse: dropping a stalled client (${c.from})`); dropClient(c); }
     } catch { dropClient(c); }
   }
+  // Recent broadcasts for clients that can't hold an SSE stream open (GET /api/events/poll).
+  const RECENT_MAX = 200;
+  const recent = []; // [{id, event, data}] oldest first; ids come from eventSeq (gaps are SSE-only snapshot ids)
+  const pollWaiters = new Set(); // () => void, woken by the next broadcast
+  let wakeTimer = null;
+  function wakePollers() {
+    // Coalesce a burst (user chat + status + op + reply) into one response per waiter.
+    if (wakeTimer || !pollWaiters.size) return;
+    wakeTimer = setTimeout(() => {
+      wakeTimer = null;
+      const ws = [...pollWaiters];
+      pollWaiters.clear();
+      for (const w of ws) { try { w(); } catch { /* gone */ } }
+    }, 40);
+    wakeTimer.unref?.();
+  }
   function broadcast(event, data) {
-    const chunk = `id: ${++eventSeq}\nevent: ${event}\ndata: ${JSON.stringify(data ?? null)}\n\n`;
+    const json = JSON.stringify(data ?? null);
+    const id = ++eventSeq;
+    const chunk = `id: ${id}\nevent: ${event}\ndata: ${json}\n\n`;
+    recent.push({ id, event, data: JSON.parse(json) });
+    if (recent.length > RECENT_MAX) recent.splice(0, recent.length - RECENT_MAX);
+    wakePollers();
     for (const c of clients) writeTo(c, chunk);
     if (event === 'status' && data && typeof data === 'object') status = { ...data }; // vibe reports status too
     if (event === 'chat' && data && typeof data.text === 'string') {
@@ -722,6 +744,38 @@ export async function startServer(opts = {}) {
       return 'sse';
     },
 
+    // Polling twin of /api/events for clients whose proxy won't stream (see docs/CONTRACT.md).
+    //   ?from=<last id seen>&wait=<ms, <= 20000>  ->  {events:[{id, event, data}], last}
+    //   no `from`, a `from` older than the buffer, or one from before a server restart  ->  {snapshot, status, last}
+    // With `wait`, an empty answer is held until the next broadcast (or the wait runs out): near-real-time via the tunnel.
+    'GET /api/events/poll': async (req, res, url) => {
+      const fromRaw = url.searchParams.get('from');
+      const from = fromRaw === null || fromRaw === '' ? NaN : Number(fromRaw);
+      const wait = Math.min(20000, Math.max(0, Math.floor(Number(url.searchParams.get('wait')) || 0)));
+      const oldest = recent.length ? recent[0].id : eventSeq + 1;
+      if (!Number.isInteger(from) || from < 0 || from > eventSeq || from < oldest - 1) {
+        return sendJson(res, 200, { snapshot: world.get(), status: { ...status }, last: eventSeq });
+      }
+      const newer = () => recent.filter((e) => e.id > from);
+      let events = newer();
+      if (!events.length && wait > 0) {
+        if (pollWaiters.size >= 200) return sendJson(res, 503, { error: 'too many listeners' });
+        req.socket.setTimeout?.(0);
+        await new Promise((done) => {
+          let t = null;
+          const finish = () => { clearTimeout(t); pollWaiters.delete(finish); res.off('close', finish); done(); };
+          t = setTimeout(finish, wait);
+          pollWaiters.add(finish);
+          res.on('close', finish);
+        });
+        if (res.destroyed || res.writableEnded) return 'poll-gone';
+        // The buffer may have rolled past `from` during a very long burst: hand back a snapshot then.
+        if (recent.length && recent[0].id > from + 1) return sendJson(res, 200, { snapshot: world.get(), status: { ...status }, last: eventSeq });
+        events = newer();
+      }
+      sendJson(res, 200, { events, last: events.length ? events[events.length - 1].id : eventSeq });
+    },
+
     'POST /api/chat': async (req, res) => {
       const body = await readJson(req, 64 * 1024);
       const text = oneLine(body?.text, 2000);
@@ -850,7 +904,7 @@ export async function startServer(opts = {}) {
       if (!res.headersSent) sendJson(res, code, { error: code === 500 ? 'internal error' : e.message }, code === 413 ? { Connection: 'close' } : {});
       else try { res.end(); } catch { /* gone */ }
     } finally {
-      const quiet = p === '/api/health' || (!isApi && !isMcp && (res.statusCode < 400));
+      const quiet = p === '/api/health' || (p === '/api/events/poll' && res.statusCode < 400) || (!isApi && !isMcp && (res.statusCode < 400));
       if (outcome === 'sse') log(`sse open (${clients.size} listening)`);
       else if (!quiet) log(`${res.statusCode} ${req.method} ${redact(req.url)} ${Date.now() - t0}ms`);
     }
@@ -889,6 +943,8 @@ export async function startServer(opts = {}) {
     closing = (async () => {
       log(`shutting down (${reason})`);
       clearInterval(pinger);
+      clearTimeout(wakeTimer);
+      for (const w of [...pollWaiters]) { try { w(); } catch { /* gone */ } }
       world.flush();
       for (const c of [...clients]) dropClient(c);
       server.close();

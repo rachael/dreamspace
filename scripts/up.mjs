@@ -6,6 +6,7 @@
 //   3. the app   node server/app.mjs on :8787, with the token from .env.local (made on first run).
 //   4. tunnel    a cloudflared quick tunnel (free, no account): a public https URL for the phone, the Quest and claude.ai.
 //   5. checks    health, live events (SSE) and MCP *through* the public URL, so a broken tunnel shows now, not mid-demo.
+//                A fresh trycloudflare name is looked up on public DNS first, so this Mac never caches "no such host".
 //   6. prints    the phone, viewer, Quest and claude.ai connector URLs, and a QR code for the phone.
 //
 //   npm run up -- --local          no tunnel: this Mac, plus a Quest over USB
@@ -23,6 +24,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
+import { Resolver } from 'node:dns/promises';
 import { once } from 'node:events';
 import {
   accessSync, constants as FS, createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync,
@@ -498,9 +500,31 @@ async function startTunnel() {
 
 // ------------------------------------------------------------------------------------------------ 5. checks
 
-/** health, then a live-events (SSE) snapshot and an MCP initialize + tools/list, against any base URL. */
+/**
+ * Wait until `host` has an address on public DNS (Cloudflare, then Google). A fresh quick-tunnel name takes a few
+ * seconds to exist, and trycloudflare.com's negative TTL is 60 s: if this Mac asks too early, macOS caches "no such
+ * host" for a minute and every retry fails with ENOTFOUND. Asking a public resolver first never touches that cache.
+ */
+export async function waitForPublicDns(host, ms = 30_000) {
+  const r = new Resolver({ timeout: 2000, tries: 1 });
+  r.setServers(['1.1.1.1', '1.0.0.1', '8.8.8.8']);
+  const t0 = Date.now();
+  const found = await waitFor(async () => (await r.resolve4(host).catch(() => [])).length > 0, ms, 1000, () => !!S.stopping);
+  return { ok: !!found, ms: Date.now() - t0 };
+}
+
+/** Worth retrying while a tunnel warms up: the name isn't resolvable yet, the edge answers 5xx, or it's slow. */
+const transient = (detail) => /^(ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|UND_ERR_\w+|TimeoutError|HTTP 5\d\d)$/.test(detail)
+  || /timeout|aborted/i.test(detail);
+
+/** health, then live events (SSE) first bytes and an MCP initialize + tools/list, against any base URL. */
 export async function checkThrough(base, token, { healthWaitMs = 0 } = {}) {
   const res = { base };
+  const host = (() => { try { return new URL(base).hostname; } catch { return ''; } })();
+  if (healthWaitMs && host && !isLocalUrl(base)) {
+    res.dns = await waitForPublicDns(host, healthWaitMs);
+    if (res.dns.ok && res.dns.ms > 1000) await sleep(1500); // the name just appeared: give the edge a breath
+  }
   const t0 = Date.now();
   let last = '';
   for (;;) {
@@ -509,17 +533,18 @@ export async function checkThrough(base, token, { healthWaitMs = 0 } = {}) {
       if (r.ok) { res.health = { ok: true, body: await r.json().catch(() => null) }; break; }
       last = `HTTP ${r.status}`;
       await r.body?.cancel();
-    } catch (e) { last = e.cause?.code || e.message; }
-    if (Date.now() - t0 >= healthWaitMs || S.stopping) break;
+    } catch (e) { last = e.cause?.code || (e.name === 'TimeoutError' ? 'TimeoutError' : e.message); }
+    if (!transient(last) || Date.now() - t0 >= healthWaitMs || S.stopping) break;
     await sleep(1500);
   }
-  res.health ??= { ok: false, detail: last };
+  res.health ??= { ok: false, detail: last === 'ENOTFOUND' ? 'ENOTFOUND: this Mac can\'t resolve the tunnel name yet' : last };
   if (!res.health.ok) return res;
   [res.sse, res.mcp] = await Promise.all([checkSse(base, token), checkMcp(base, token)]);
   return res;
 }
 
-async function checkSse(base, token, ms = 10_000) {
+/** Live events need their first bytes (the server's `: open` comment) through promptly, not held in a proxy buffer. */
+async function checkSse(base, token, ms = 5_000) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
   const t0 = Date.now();
@@ -532,12 +557,13 @@ async function checkSse(base, token, ms = 10_000) {
     let buf = '';
     for await (const chunk of r.body) {
       buf += dec.decode(chunk, { stream: true });
-      if (/^event: snapshot$/m.test(buf)) return { ok: true, ms: Date.now() - t0 };
+      if (/^: open\b/m.test(buf)) return { ok: true, ms: Date.now() - t0 };
       if (buf.length > 4_000_000) break;
     }
-    return { ok: false, detail: 'the stream ended before the first event' };
+    return { ok: false, detail: 'the stream ended before its first bytes' };
   } catch (e) {
-    return { ok: false, detail: ac.signal.aborted ? `no event within ${ms / 1000} s (the proxy may be buffering the stream)` : (e.cause?.code || e.message) };
+    if (ac.signal.aborted) return { ok: false, buffered: true, detail: `nothing arrived within ${ms / 1000} s; the tunnel is holding the stream back` };
+    return { ok: false, detail: e.cause?.code || e.message };
   } finally {
     clearTimeout(timer);
     ac.abort();
@@ -580,7 +606,11 @@ function reportChecks(where, r) {
     r.mcp.ok ? `MCP${r.mcp.tools ? ` (${r.mcp.tools.length} tools)` : ''}` : null,
   ].filter(Boolean);
   ok(`${where}: ${parts.join(' · ')}`);
-  if (!r.sse.ok) {
+  if (r.sse.buffered) {
+    warn(`${where}: live updates can't get through this tunnel (${r.sse.detail}), so pages will fall back to polling`);
+    note('Replies still arrive, just a few seconds late. For instant updates try:');
+    note('TUNNEL_TRANSPORT_PROTOCOL=http2 npm run up     (README › Troubleshooting has more)');
+  } else if (!r.sse.ok) {
     bad(`${where}: live events failed (${r.sse.detail})`);
     note('Replies travel over live events, so the phone would not hear the guide. Try again, or:');
     note('TUNNEL_TRANSPORT_PROTOCOL=http2 npm run up     (README › Troubleshooting has more)');
@@ -650,9 +680,12 @@ function banner() {
   row('Brains', `claude ${mark(b.claude)}  ollama ${mark(b.ollama)}  scripted ${mark(b.scripted)}   ${c.dim(`default: ${h.brain || 'auto'}${h.vibe ? ' · vibe mode ready' : ''}`)}`);
   const w = S.whisper;
   row('Voice', `whisper ${w.state === 'ready' ? c.teal('✓') : w.state === 'starting' ? c.violet('…') : c.dim('·')}   ${c.dim(w.detail || 'off')}`);
-  if (S.checks?.health?.ok) {
+  if (S.checks && !S.checks.health.ok) {
+    row(P ? 'Tunnel' : 'Checks', `health ${c.rose('✗')}   ${c.dim(S.checks.health.detail)}`);
+  } else if (S.checks?.health?.ok) {
     const k = S.checks;
-    row(P ? 'Tunnel' : 'Checks', `health ${mark(true)}  live events ${k.sse.ok ? c.teal('✓') : c.rose('✗')}  MCP ${k.mcp.ok ? c.teal('✓') : c.rose('✗')}${k.mcp.tools ? c.dim(`  (${k.mcp.tools.length} tools)`) : ''}`);
+    const live = k.sse.ok ? c.teal('✓') : k.sse.buffered ? c.amber('polling') : c.rose('✗');
+    row(P ? 'Tunnel' : 'Checks', `health ${mark(true)}  live events ${live}  MCP ${k.mcp.ok ? c.teal('✓') : c.rose('✗')}${k.mcp.tools ? c.dim(`  (${k.mcp.tools.length} tools)`) : ''}`);
   }
   if (P) {
     say();

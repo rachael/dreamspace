@@ -2,51 +2,158 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22 fill=%22%234d7cff%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2215%22 fill=%22none%22 stroke=%22%236ee7ff%22 stroke-width=%222%22/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22%3E%3Cdefs%3E%3CradialGradient id=%22g%22%3E%3Cstop offset=%220%22 stop-color=%22%23e8fbff%22/%3E%3Cstop offset=%22.45%22 stop-color=%22%2378e6d8%22/%3E%3Cstop offset=%221%22 stop-color=%22%236a4fd8%22 stop-opacity=%220%22/%3E%3C/radialGradient%3E%3C/defs%3E%3Crect width=%2232%22 height=%2232%22 rx=%228%22 fill=%22%23070b1a%22/%3E%3Ccircle cx=%2216%22 cy=%2216%22 r=%2213%22 fill=%22url(%23g)%22/%3E%3C/svg%3E">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Vibe XR Starter</title>
-  <meta name="description" content="A three.js WebXR scene you remix with Claude Code and open in the PICO browser." />
+  <title>Dreamspace</title>
+  <meta name="description" content="A calm sci-fi and fantasy WebXR world you explore with a guide. Talk, type, or build it by voice." />
+  <script>if (new URLSearchParams(location.search).has('embed')) document.documentElement.classList.add('embed');</script>
   <link rel="stylesheet" href="theme/pico.css" />
   <style>
-    /* Page chrome only. Colors, fonts, radii and .pico-btn come from theme/pico.css. */
-    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--pico-bg); color: var(--pico-ink); font-family: var(--pico-font-body); }
+    /* Page chrome only. Fonts and base tokens come from theme/pico.css; Dreamspace adds a calm teal/violet layer. */
+    :root {
+      --ds-bg: #070b1a;
+      --ds-glass: rgba(12, 18, 38, 0.72);
+      --ds-glass-2: rgba(28, 36, 66, 0.78);
+      --ds-line: rgba(160, 200, 255, 0.16);
+      --ds-ink: #eaf2ff;
+      --ds-dim: #a7b4d6;
+      --ds-teal: #78e6d8;
+      --ds-violet: #a393ff;
+      --ds-rose: #f2a7c3;
+      --ds-warn: #ffc27a;
+    }
+    html, body { margin: 0; height: 100%; overflow: hidden; background: var(--ds-bg); color: var(--ds-ink); font-family: var(--pico-font-body); }
     canvas { display: block; }
-    .pico-overlay { position: fixed; inset: auto 0 0 0; padding: 32px 16px calc(28px + env(safe-area-inset-bottom)); display: grid; justify-items: center; gap: var(--pico-gap, 16px); pointer-events: none; background: linear-gradient(to top, color-mix(in srgb, var(--pico-bg) 92%, transparent) 40%, transparent); }
-    .pico-overlay > * { pointer-events: auto; }
-    .pico-title { margin: 0; text-align: center; font-size: clamp(30px, 6vw, 52px); line-height: 1.05; text-shadow: 0 0 28px color-mix(in srgb, var(--pico-glow) 40%, transparent); }
-    .pico-hint { margin: 0; max-width: 48ch; text-align: center; font-size: 14px; line-height: 1.5; color: var(--pico-ink-dim); }
-    .pico-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; min-height: var(--pico-target, 56px); }
-    /* three's VRButton / ARButton set inline styles; these rules make them .pico-btn look-alikes. */
+    html.embed .ds-overlay { display: none !important; }
+
+    .ds-overlay { position: fixed; inset: 0; pointer-events: none; display: grid; grid-template-rows: auto 1fr auto;
+      padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom)); box-sizing: border-box; }
+    .ds-overlay button, .ds-overlay input, .ds-overlay select, .ds-card { pointer-events: auto; }
+
+    .ds-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .ds-title { margin: 0; font-family: var(--pico-font-display); font-weight: 600; letter-spacing: .02em;
+      font-size: clamp(28px, 4.2vw, 44px); line-height: 1.05;
+      background: linear-gradient(100deg, #eaf2ff 10%, var(--ds-teal) 55%, var(--ds-violet) 95%);
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      filter: drop-shadow(0 0 18px rgba(120, 230, 216, .25)); }
+    .ds-sub { margin: 6px 0 0; max-width: 42ch; font-size: 14px; line-height: 1.5; color: var(--ds-dim); }
+    .ds-conn { flex: none; font-size: 12px; padding: 5px 10px 5px 22px; border-radius: 999px; background: var(--ds-glass);
+      border: 1px solid var(--ds-line); color: var(--ds-dim); position: relative; pointer-events: auto; backdrop-filter: blur(10px); }
+    .ds-conn::before { content: ''; position: absolute; left: 9px; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: var(--ds-dim); }
+    .ds-conn[data-tone="ok"]::before { background: var(--ds-teal); box-shadow: 0 0 8px var(--ds-teal); }
+    .ds-conn[data-tone="wait"]::before { background: var(--ds-violet); animation: ds-breathe 2.4s ease-in-out infinite; }
+    .ds-conn[data-tone="bad"]::before { background: var(--ds-warn); }
+    @keyframes ds-breathe { 50% { opacity: .35; } }
+
+    .ds-card { align-self: end; width: min(440px, 100%); box-sizing: border-box; display: grid; gap: 10px; padding: 14px;
+      border-radius: 20px; background: var(--ds-glass); border: 1px solid var(--ds-line); backdrop-filter: blur(14px);
+      box-shadow: 0 10px 40px rgba(0, 0, 0, .35); }
+    body.vibe .ds-card { border-color: rgba(242, 167, 195, .35); }
+
+    .ds-log { max-height: min(28vh, 220px); overflow-y: auto; display: grid; gap: 6px; margin: 0; padding-right: 4px; scrollbar-width: thin; }
+    .ds-log .line { margin: 0; font-size: 14px; line-height: 1.45; }
+    .ds-log .who { display: block; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ds-dim); }
+    .ds-log .guide .who { color: var(--ds-teal); }
+    .ds-log .vibe .who { color: var(--ds-rose); }
+    .ds-log .user { color: var(--ds-dim); }
+    .ds-interim { margin: 0; font-size: 14px; font-style: italic; color: var(--ds-violet); }
+    .ds-status { margin: 0; min-height: 18px; font-size: 13px; color: var(--ds-dim); }
+    .ds-status[data-tone="warn"] { color: var(--ds-warn); }
+
+    .ds-ask { display: flex; gap: 8px; }
+    .ds-ask input { flex: 1; min-width: 0; height: 44px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--ds-line);
+      background: rgba(4, 8, 20, .6); color: var(--ds-ink); font: 16px var(--pico-font-body); outline: none; }
+    .ds-ask input:focus { border-color: var(--ds-teal); box-shadow: 0 0 0 3px rgba(120, 230, 216, .18); }
+    .ds-round { flex: none; width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--ds-line); cursor: pointer;
+      display: grid; place-items: center; background: var(--ds-glass-2); color: var(--ds-ink); transition: box-shadow .2s, background .2s; }
+    .ds-round:disabled { opacity: .4; cursor: default; }
+    .ds-round svg { width: 20px; height: 20px; }
+    .ds-send { background: linear-gradient(135deg, #3f8f9a, #5b4bc4); border: 0; }
+    .ds-mic[aria-pressed="true"] { background: rgba(120, 230, 216, .22); border-color: var(--ds-teal); box-shadow: 0 0 18px rgba(120, 230, 216, .35); }
+    .ds-mic[data-state="hearing"] { animation: ds-pulse 1.6s ease-in-out infinite; }
+    @keyframes ds-pulse { 50% { box-shadow: 0 0 28px rgba(120, 230, 216, .6); } }
+
+    .ds-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .ds-chip { height: 34px; padding: 0 12px; border-radius: 999px; border: 1px solid var(--ds-line); background: transparent;
+      color: var(--ds-dim); font: 500 13px var(--pico-font-body); cursor: pointer; }
+    .ds-chip[aria-pressed="true"] { color: var(--ds-ink); background: rgba(120, 230, 216, .16); border-color: rgba(120, 230, 216, .5); }
+    #vibe[aria-pressed="true"] { background: rgba(242, 167, 195, .16); border-color: rgba(242, 167, 195, .55); }
+    .ds-chip:disabled { opacity: .45; cursor: default; }
+    .ds-select { height: 34px; padding: 0 10px; border-radius: 999px; border: 1px solid var(--ds-line); background: var(--ds-glass-2);
+      color: var(--ds-ink); font: 500 13px var(--pico-font-body); }
+    .ds-phone { margin: 0; font-size: 12.5px; color: var(--ds-dim); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .ds-phone .url { color: var(--ds-ink); }
+    .ds-phone button { height: 28px; font-size: 12px; }
+
+    /* three's VRButton / ARButton set inline styles; these rules make them calm pills. */
+    .pico-actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .pico-actions > * {
       position: static !important; left: auto !important; bottom: auto !important; width: auto !important;
       display: inline-flex !important; align-items: center; justify-content: center; box-sizing: border-box;
-      min-width: 168px; min-height: var(--pico-target, 56px); padding: 0 24px !important;
-      border: 0 !important; border-radius: 999px !important; opacity: 1 !important;
-      background: var(--pico-accent) !important; color: #fff !important; text-decoration: none !important;
-      font: 700 19px/1 var(--pico-font-body) !important; letter-spacing: .02em;
-      transition: transform 160ms ease, box-shadow 160ms ease;
+      min-width: 128px; min-height: 40px; padding: 0 18px !important;
+      border: 1px solid rgba(120, 230, 216, .45) !important; border-radius: 999px !important; opacity: 1 !important;
+      background: rgba(120, 230, 216, .14) !important; color: var(--ds-ink) !important; text-decoration: none !important;
+      font: 600 14px/1 var(--pico-font-body) !important; letter-spacing: .02em;
+      transition: box-shadow 160ms ease;
     }
     .pico-actions > *[style*="display: none"] { display: none !important; }
-    .pico-actions > button:hover, .pico-actions > button:focus-visible { box-shadow: 0 0 0 2px var(--pico-glow), 0 0 24px color-mix(in srgb, var(--pico-glow) 45%, transparent); transform: translateY(-2px); outline: none; }
-    .pico-actions > #ARButton { background: var(--pico-surface-2) !important; color: var(--pico-ink) !important; }
+    .pico-actions > button:hover, .pico-actions > button:focus-visible { box-shadow: 0 0 20px rgba(120, 230, 216, .35); outline: none; }
+    .pico-actions > #ARButton { background: transparent !important; border-color: var(--ds-line) !important; }
     /* "VR NOT SUPPORTED" / "WEBXR NEEDS HTTPS" states: a quiet chip, not a call to action */
-    .pico-actions > a, .pico-actions > button[style*="cursor: auto"], .pico-actions > #ARButton[style*="cursor: auto"] { background: var(--pico-surface-2) !important; color: var(--pico-ink-dim) !important; font: 500 14px/1.2 var(--pico-font-body) !important; min-height: 40px; box-shadow: none !important; transform: none !important; }
+    .pico-actions > a, .pico-actions > button[style*="cursor: auto"], .pico-actions > #ARButton[style*="cursor: auto"] {
+      background: transparent !important; border-color: var(--ds-line) !important; color: var(--ds-dim) !important;
+      font: 500 12px/1.2 var(--pico-font-body) !important; min-height: 32px; box-shadow: none !important; }
+    @media (max-height: 560px) { .ds-sub { display: none; } .ds-log { max-height: 18vh; } }
   </style>
+  <!-- The esm.sh entries point the desktop emulator (IWER DevUI, @pmndrs/*) at this same three, so only one copy loads. -->
   <script type="importmap">
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
-        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/"
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+        "https://esm.sh/three?target=es2022": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "https://esm.sh/three@^0.184.0?target=es2022": "https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+        "https://esm.sh/three/src/math/MathUtils?target=es2022": "https://cdn.jsdelivr.net/npm/three@0.186.1/src/math/MathUtils.js"
       }
     }
   </script>
 </head>
 <body>
-  <div class="pico-overlay">
-    <span class="pico-chip">PICO · WebXR · three.js</span>
-    <h1 class="pico-title pico-display">Vibe XR Starter</h1>
-    <div class="pico-actions" id="xr-buttons"></div>
-    <p class="pico-hint" id="hint">Drag to orbit. Click the orb to spin it. Open this page over HTTPS in the PICO browser to enter VR or AR.</p>
+  <div class="ds-overlay">
+    <header class="ds-head">
+      <div>
+        <h1 class="ds-title">Dreamspace</h1>
+        <p class="ds-sub">A calm world between the stars. Talk with Lumen, your guide, and shape it together, or build by voice in Vibe mode.</p>
+      </div>
+      <span class="ds-conn" id="conn" data-tone="wait">Connecting…</span>
+    </header>
+    <div></div>
+    <section class="ds-card" aria-label="Talk to the guide">
+      <div class="ds-log" id="log" aria-live="polite" hidden></div>
+      <p class="ds-interim" id="interim" hidden></p>
+      <p class="ds-status" id="status" role="status"></p>
+      <form class="ds-ask" id="ask" autocomplete="off">
+        <button type="button" class="ds-round ds-mic" id="mic" aria-pressed="false" aria-label="Talk" title="Talk">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></svg>
+        </button>
+        <input id="text" type="text" enterkeyhint="send" maxlength="1500" placeholder="Say something to Lumen…" aria-label="Message" />
+        <button type="submit" class="ds-round ds-send" id="send" aria-label="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h13M13 6l6 6-6 6"/></svg>
+        </button>
+      </form>
+      <div class="ds-row">
+        <button type="button" class="ds-chip" id="handsfree" aria-pressed="false">Hands-free</button>
+        <button type="button" class="ds-chip" id="vibe" aria-pressed="false" title="Describe something and Claude Code builds it into the world">Vibe</button>
+        <select class="ds-select" id="brain" aria-label="Guide brain">
+          <option value="auto" data-name="the best available">Auto brain</option>
+          <option value="claude" data-name="Claude" data-label="Claude">Claude</option>
+          <option value="ollama" data-name="the local model" data-label="Local">Local</option>
+          <option value="scripted" data-name="scripted rules" data-label="Scripted">Scripted</option>
+        </select>
+      </div>
+      <div class="pico-actions" id="xr-buttons"></div>
+      <p class="ds-phone" id="phone-hint">On your phone: <span class="url"></span> <button type="button" class="ds-chip" id="copy-phone" hidden>Copy phone link</button></p>
+    </section>
   </div>
   <script type="module" src="src/main.js"></script>
 </body>
