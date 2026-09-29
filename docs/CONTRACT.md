@@ -162,6 +162,16 @@ Dreamspace is one surface of her "voice-agent metaharness": one Claude across mo
 - **Stable API:** don't break the `/api/*` + SSE + `/mcp/<token>` shapes. `scripts/up.mjs` writes the current public base URL (no token) to `.data/public-url` on every start. The token is stable across restarts (`.env.local`).
 - **Spatial voice (a):** an optional path. `POST /api/tts {text}` renders speech locally with macOS `say` (convert to m4a/wav with `afconvert`) and returns an audio URL/bytes. The client plays it through WebAudio: `PannerNode` (`panningModel:'HRTF'`) at the guide's world position, updated every frame, plus a subtle delay/echo chain. It has a toggle (on by default when supported), and plain `speechSynthesis` is the fallback. The guide's light pulses and moves with the voice.
 - **While you were away (b):** env `CONTEXTLOG_URL` + `CONTEXTLOG_TOKEN`. On a session's first connect, the server reads a `context_state`-style summary, and the guide greets her with it in ≤ 2 sentences. Stubbed and silent until configured.
-- **Idea capture (c):** when she proposes a change or idea, the guide says "logged that as an idea" and the server POSTs `{text, source:'dreamspace', ts}` to `CONTEXTLOG_IDEAS_URL` (bearer `CONTEXTLOG_TOKEN`). Otherwise it appends to `.data/ideas.jsonl`. `GET /api/ideas` lists them. Brains get an `idea` op, or equivalent: `{type:'idea', text}`.
+- **Idea capture (c):** when she proposes a change or idea, the guide says "logged that as an idea" and the server POSTs `{text, source:'dreamspace', ts}` to contextlog `/api/{token}/ideas` (see Contextlog wiring). Otherwise it appends to `.data/ideas.jsonl`. `GET /api/ideas` lists them. Brains get an `idea` op, or equivalent: `{type:'idea', text}`.
 - **Event mirror:** when `CONTEXTLOG_EVENTS_URL` is set, `op`/`chat` events are forwarded (batched, best-effort, never blocking).
 - **Demo safety (d, hard rule, all brains):** the guide never raises health, disability, benefits or income topics. The persona rule is backed by a server-side reply filter that swaps any such reply for a gentle redirect. On-topic: the sponsors, Dreamspace, voice-agent infrastructure.
+
+### Contextlog wiring (live 2026-09-29, from projects-d9)
+- Base `CONTEXTLOG_URL` (default `http://127.0.0.1:7779`; a public Vultr `https://<ip>.sslip.io` URL comes later). The token is **not copied** into this repo: the server reads
+  `CONTEXTLOG_TOKEN` at runtime from `CONTEXTLOG_ENV_FILE` (default `../claude-app-contextational-analysis/.env.local`), or from the env if set. It is never logged, never sent to clients, never committed.
+  The token goes in the URL **path**.
+- `GET  {base}/api/{token}/while-away?surface=spatial` → `{now, since, ambient_notes:[{ts,title,text,location,people}], queued_ideas:[], guidance}`. Already demo-safe server-side, and our filter still applies. Used for the first-connect greeting.
+- `POST {base}/api/{token}/ideas {text, source:'rae'|'claude-agreed', surface:'spatial', context}` → `{ok, id, say}`. The guide speaks `say`. On failure, fall back to `.data/ideas.jsonl`.
+- `POST {base}/api/{token}/ambient {text, title, source:'dreamspace', tags:['world-event']}`. Keep it **sparse**: batched summaries (e.g. "Rae toured 3 worlds and summoned a portal"), at most one per few minutes, never every op.
+- MCP alternative: `POST {base}/mcp/{token}`, tools `while_away`, `idea_log`, `ideas_list`, `context_ping`, `ambient_ingest` (surface `'spatial'`).
+- Never open a tunnel for contextlog; its public URL comes from its own hosting.
