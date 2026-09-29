@@ -16,6 +16,8 @@
 // Each creation module: export default function create({ THREE, scene, room, world, addUpdate }) → Object3D.
 // Safety: every import/create()/update runs in try/catch. A failed new version leaves the previous version running.
 // An update that throws, or that stays too slow for the headset, is paused (the object stays, frozen) with an error chip.
+// Every AUDIT_S seconds each live creation is re-measured by capacity (the same rules as the server check); one that
+// has grown past the headset budget or added a light, shadow or transmission is hidden and paused, with an error chip.
 // The previous version of a slug is fully disposed (geometries, materials, textures, instance buffers, anything
 // create() added to scene/room directly). Stale async loads are dropped, so rapid edits never race.
 
@@ -26,6 +28,10 @@ const REMOVE_S = 0.5;     // removal: shrink away
 const CHIP_S = 15;        // error chips fade after this many seconds
 const SLOW_MS = 6;        // an update slower than this (per frame)...
 const SLOW_FRAMES = 45;   // ...for this many frames in a row gets paused
+const AUDIT_S = 1.5;      // every live creation is re-measured this often (staggered), since it may grow after validation
+// The server validates against 16 draw calls / 50k triangles / 5k points (counted by capacity, hidden objects included).
+// A live creation that grows well past that (instances, drawRange, new meshes, a light) is hidden and paused.
+const LIVE_LIMITS = { drawCalls: 20, triangles: 62_500, points: 6_250 };
 
 const errText = (e) => String((e && e.message) || e || 'unknown error').split('\n')[0].slice(0, 160);
 const easeOut = (p) => 1 - Math.pow(1 - Math.min(1, Math.max(0, p)), 3);
@@ -155,6 +161,59 @@ export function createCreations({ THREE, scene, room = null, world = null, onErr
     } catch {}
   }
 
+  // ---------- live budget audit (capacity-based, hidden objects included, like the server check) ----------
+  function measureInto(obj, s) {
+    obj.traverse((o) => {
+      if (o.isLight) s.lights++;
+      if (o.castShadow || o.receiveShadow) s.shadows++;
+      const mats = Array.isArray(o.material) ? o.material : o.material ? [o.material] : [];
+      for (const m of mats) if (m.transmission > 0) s.transmission++;
+      if (o.isBatchedMesh) { s.drawCalls++; s.triangles += Math.floor((o._maxIndexCount || o._maxVertexCount || 0) / 3); return; }
+      const g = o.geometry;
+      if (!g || !g.attributes) { if (o.isSprite) { s.drawCalls++; s.triangles += 2; } return; }
+      const pos = g.attributes.position ? g.attributes.position.count : 0;
+      const base = g.index ? g.index.count : pos;
+      let inst = 1;
+      if (o.isInstancedMesh) inst = Math.max(o.count || 0, o.instanceMatrix ? o.instanceMatrix.count : 0);
+      if (g.isInstancedBufferGeometry) {
+        let cap = 0;
+        for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.isInstancedBufferAttribute) cap = Math.max(cap, a.count); }
+        inst *= Math.max(1, cap, Number.isFinite(g.instanceCount) ? g.instanceCount : 0);
+      }
+      if (o.isMesh) { s.drawCalls += Array.isArray(o.material) ? Math.max(1, g.groups.length) : 1; s.triangles += Math.floor(base / 3) * inst; }
+      else if (o.isPoints) { s.drawCalls++; s.points += pos * inst; }
+      else if (o.isLine) s.drawCalls++;
+      else if (o.isSprite) { s.drawCalls++; s.triangles += 2; }
+    });
+    return s;
+  }
+
+  /** null when the creation is within budget, else a short reason. */
+  function auditProblem(e) {
+    const s = { drawCalls: 0, triangles: 0, points: 0, lights: 0, shadows: 0, transmission: 0 };
+    if (e.holder) measureInto(e.holder, s);
+    for (const x of e.extras) measureInto(x, s);
+    if (s.lights) return 'it added a light';
+    if (s.shadows) return 'it turned on shadows';
+    if (s.transmission) return 'it used glass transmission';
+    if (s.drawCalls > LIVE_LIMITS.drawCalls) return `it grew to ${s.drawCalls} draw calls`;
+    if (s.triangles > LIVE_LIMITS.triangles) return `it grew to ${Math.round(s.triangles / 1000)}k triangles`;
+    if (s.points > LIVE_LIMITS.points) return `it grew to ${s.points} points`;
+    return null;
+  }
+
+  function audit(e) {
+    e.auditAt = clock + AUDIT_S;
+    let why = null;
+    try { why = auditProblem(e); } catch { return; }
+    if (!why) return;
+    e.paused = true;
+    e.status = 'hidden';
+    if (e.holder) e.holder.visible = false;
+    for (const x of e.extras) x.visible = false;
+    report(e, `hidden: ${why}, too heavy for the headset`);
+  }
+
   // ---------- load one version ----------
   async function upsert(slug, url) {
     const e = entryFor(slug);
@@ -220,7 +279,7 @@ export function createCreations({ THREE, scene, room = null, world = null, onErr
       } else { root.getWorldPosition(e.pivot); e.top = e.pivot.y + 0.5; e.bottom = 0; e.radius = 1; }
     } catch { e.pivot.set(0, 1, -3); e.top = 1.5; e.bottom = 0; e.radius = 1; }
 
-    Object.assign(e, { url, holder, root, extras, updates, status: 'ok', error: null, paused: false, slow: 0 });
+    Object.assign(e, { url, holder, root, extras, updates, status: 'ok', error: null, paused: false, slow: 0, auditAt: clock });
     const from = firstTime ? 0.001 : 0.92;
     holder.scale.setScalar(from);
     holder.position.copy(e.pivot).multiplyScalar(1 - from);
@@ -285,6 +344,7 @@ export function createCreations({ THREE, scene, room = null, world = null, onErr
         const f = 1 - (clock - e.chipT - CHIP_S) / 1.5;
         if (f <= 0) hideChip(e); else e.chip.material.opacity = f;
       }
+      if (e.status === 'ok' && clock >= (e.auditAt ?? 0)) audit(e);   // also runs for paused/static creations
       if (e.status !== 'ok' || e.paused || !e.updates.length) continue;
       const t0 = typeof performance !== 'undefined' ? performance.now() : 0;
       for (const fn of e.updates) {

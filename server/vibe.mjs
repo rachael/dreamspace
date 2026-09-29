@@ -22,17 +22,24 @@
 //   creation {slug, url:'/creations/<slug>.js?v=<mtime>', action:'upsert'|'remove'}
 //   error    {message}
 //
-// Security model (verified empirically with claude 2.1.282, see the vibe builder's report):
+// Security model (verified empirically with claude 2.1.282 and re-verified on 2.1.285, see the vibe builder's report):
 //   - `claude -p` long-lived stream-json session, cwd = creations/, --restricted (file tools confined to cwd, no Bash/web,
 //     ignores user/project settings), --tools Read,Write,Edit,Glob, --permission-mode acceptEdits,
 //     --permission-prompts none (anything that would prompt is denied), --strict-mcp-config with no servers (zero MCP;
 //     the world is described in each prompt instead), --setting-sources "" (no CLAUDE.md, no hooks), README.md write-denied.
 //     Never --dangerously-skip-permissions, never bypassPermissions, never ANTHROPIC_API_KEY (stripped from the child env).
-//   - Every changed file is validated: kebab-case name, size, a banned-pattern lint (comments and strings ignored),
-//     `node --check`, then create() + 120 frames of updates run against three r186 inside a Node permission sandbox
-//     (no fs writes, no network, no child processes, no eval) that also measures the perf budget.
+//   - Every changed file is validated: kebab-case name, size, a banned-pattern lint (comments, strings and regex
+//     literals ignored; a file the scanner can't read cleanly is rejected), `node --check`, then create() + 120 frames
+//     of updates (plus a few at t = 10/60/600 s) run against three r186 inside a Node permission sandbox (no fs writes,
+//     no network, no child processes, no eval). The sandbox's canvas/document stand-ins record any reach back into the
+//     page (ownerDocument, defaultView, ...), however the name is spelled. The perf budget is counted by capacity over
+//     every object, hidden ones included (InstancedMesh by instanceMatrix size, geometry ignoring drawRange), so a
+//     creation can't pass small and grow later; src/world/creations.js re-audits live creations in the browser too.
 //     Failures go back to Claude for one repair round; anything still failing is rolled back, so clients only ever
 //     receive creations that passed.
+//   - Limits of this model: the lint and the Node run are guardrails, not an in-browser sandbox. A creation runs as
+//     same-origin page code; the page-level defences (a CSP without 'unsafe-eval' and with connect-src 'self', and not
+//     keeping the token in localStorage) belong to the viewer/server owners.
 //
 // Env: VIBE_MODEL (default sonnet), VIBE_TURN_TIMEOUT_MS (180000), VIBE_JOB_TIMEOUT_MS (300000),
 //      VIBE_REPAIR_ROUNDS (1), VIBE_RUNTIME_CHECK ('0' disables), VIBE_THREE_DIR (cache for the sandbox's three.js;
@@ -77,72 +84,142 @@ const log = (...a) => console.log('[vibe]', ...a);
 // It is a guardrail against accidents, not a sandbox; the runtime check below is the real sandbox.
 // =====================================================================================================
 
-/** Same-length copy of `src` with comments and string/template text replaced by spaces (newlines kept). */
-export function stripCode(src) {
+// After these keywords a `/` starts a regex literal, not a division.
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'case', 'do', 'else', 'in', 'of', 'new', 'delete', 'void', 'throw', 'yield', 'await', 'instanceof']);
+const COND_PAREN_WORD = new Set(['if', 'while', 'for', 'with']);
+
+/**
+ * Same-length copy of `src` with comments, string/template text and regex-literal bodies replaced by spaces (newlines kept).
+ * Returns { code, error }: `error` is set when the scanner lost track (an unterminated string, regex, template or comment),
+ * because a desynced scan could hide real code as "string"; the lint then rejects the file instead of trusting it.
+ */
+export function scanCode(src) {
   const out = [];
   const n = src.length;
   const tplStack = [];            // brace depth at each open `${`
-  let depth = 0, mode = 'code', quote = '';
+  const parens = [];              // for each open `(`: was it the condition of if/while/for/with?
+  let depth = 0, mode = 'code', quote = '', inClass = false, error = null;
+  let prev = '', prev2 = '', prevWord = '', condParenClosed = false; // last significant code char / identifier, for regex detection
   const blank = (c) => (c === '\n' ? '\n' : ' ');
+  const regexAllowed = () => {
+    if (!prev) return true;
+    if (/[\w$]/.test(prev)) return REGEX_AFTER_WORD.has(prevWord);
+    if (prev === ')') return condParenClosed;       // `if (x) /re/.test(s)` vs `(a + b) / 2`
+    if (prev === ']') return false;
+    if ((prev === '+' || prev === '-') && prev2 === prev) return false; // a++ / 2
+    return true;                                    // ( , = : [ ! & | ? { } ; + - * % < > ~ ^ =>
+  };
   for (let i = 0; i < n; i++) {
     const c = src[i], d = src[i + 1];
     if (mode === 'code') {
       if (c === '/' && d === '/') { mode = 'line'; out.push('  '); i++; continue; }
       if (c === '/' && d === '*') { mode = 'block'; out.push('  '); i++; continue; }
+      if (c === '/' && regexAllowed()) { mode = 'regex'; inClass = false; out.push(c); continue; }
       if (c === '"' || c === "'") { mode = 'str'; quote = c; out.push(c); continue; }
       if (c === '`') { mode = 'tpl'; out.push(c); continue; }
-      if (c === '{') { depth++; out.push(c); continue; }
-      if (c === '}') {
-        if (tplStack.length && depth === tplStack[tplStack.length - 1]) { tplStack.pop(); mode = 'tpl'; out.push(c); continue; }
-        depth--; out.push(c); continue;
+      if (/\s/.test(c)) { out.push(c); continue; }
+      if (/[\w$]/.test(c)) {
+        let j = i; while (j < n && /[\w$]/.test(src[j])) j++;
+        const word = src.slice(i, j);
+        out.push(word); i = j - 1; prev = word[word.length - 1]; prevWord = word; continue;
       }
-      out.push(c);
+      if (c === '(') { parens.push(COND_PAREN_WORD.has(prevWord) && /[\w$]/.test(prev)); }
+      else if (c === ')') { condParenClosed = parens.length ? parens.pop() : false; }
+      else if (c === '{') depth++;
+      else if (c === '}') {
+        if (tplStack.length && depth === tplStack[tplStack.length - 1]) { tplStack.pop(); mode = 'tpl'; out.push(c); continue; }
+        depth--;
+      }
+      out.push(c); prev2 = prev; prev = c; prevWord = '';
     } else if (mode === 'line') {
       if (c === '\n') { mode = 'code'; out.push('\n'); } else out.push(' ');
     } else if (mode === 'block') {
       if (c === '*' && d === '/') { mode = 'code'; out.push('  '); i++; } else out.push(blank(c));
     } else if (mode === 'str') {
       if (c === '\\') { out.push(' ', blank(d ?? '')); i++; continue; }
-      if (c === quote) { mode = 'code'; out.push(c); continue; }
-      if (c === '\n') { mode = 'code'; out.push('\n'); continue; } // unterminated: let node --check report it
+      if (c === quote) { mode = 'code'; out.push(c); prev = c; prevWord = ''; continue; }
+      if (c === '\n') { error ??= `line ${lineAt(src, i)}: unterminated string`; mode = 'code'; out.push('\n'); continue; }
+      out.push(' ');
+    } else if (mode === 'regex') {
+      if (c === '\\') { if (d === '\n') { error ??= `line ${lineAt(src, i)}: unterminated regular expression`; } out.push(' ', blank(d ?? '')); i++; continue; }
+      if (c === '\n') { error ??= `line ${lineAt(src, i)}: unterminated regular expression`; mode = 'code'; out.push('\n'); continue; }
+      if (inClass) { if (c === ']') inClass = false; out.push(' '); continue; }
+      if (c === '[') { inClass = true; out.push(' '); continue; }
+      if (c === '/') { mode = 'code'; out.push(c); prev = ')'; condParenClosed = false; prevWord = ''; continue; } // like a value: `/x/ / 2`
       out.push(' ');
     } else { // tpl
       if (c === '\\') { out.push(' ', blank(d ?? '')); i++; continue; }
-      if (c === '`') { mode = 'code'; out.push(c); continue; }
-      if (c === '$' && d === '{') { tplStack.push(depth); mode = 'code'; out.push('${'); i++; continue; }
+      if (c === '`') { mode = 'code'; out.push(c); prev = c; prevWord = ''; continue; }
+      if (c === '$' && d === '{') { tplStack.push(depth); mode = 'code'; out.push('${'); i++; prev = '{'; prevWord = ''; continue; }
       out.push(blank(c));
     }
   }
-  return out.join('');
+  if (!error && mode !== 'code' && mode !== 'line') error = `unterminated ${mode === 'block' ? 'comment' : mode === 'tpl' ? 'template string' : mode === 'regex' ? 'regular expression' : 'string'} at the end of the file`;
+  if (!error && tplStack.length) error = 'unterminated ${...} in a template string';
+  return { code: out.join(''), error };
 }
 
+/** Same-length copy of `src` with comments, strings and regex bodies blanked (see scanCode). */
+export function stripCode(src) { return scanCode(src).code; }
+
+// [regex (global), why, scope]. scope 'any': every use, including `.name` (property access); 'bare': only a bare
+// identifier (not `obj.name`; `...name` spread still counts). Either way a property *definition* (`{ name: 1 }`,
+// `, name: 2`) is fine, since it reads nothing. Shorthand `{ self }` is NOT a definition: it reads the global.
 const BANNED = [
-  [/\bimport\b/, 'no imports: THREE is passed into create()'],
-  [/\brequire\s*\(/, 'no require()'],
-  [/\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|RTCPeerConnection|importScripts|SharedWorker|Worker)\b/, 'no network or workers'],
-  [/\beval\b/, 'no eval'],
-  [/\bFunction\s*\(/, 'no Function()'],
-  [/\.\s*constructor\b|\b__proto__\b/, 'no .constructor or __proto__ tricks'],
-  [/\b(setTimeout|setInterval|requestAnimationFrame|requestIdleCallback)\b/, 'no timers: animate with addUpdate((dt, t) => ...)'],
-  [/\b(localStorage|sessionStorage|indexedDB|cookieStore|cookie)\b/, 'no storage or cookies'],
-  [/\b(window|globalThis|navigator|process)\b/, 'no browser or host globals'],
-  [/(?<![\w$.])(self|location)\b/, 'no browser globals'],
-  [/\b(camera|Camera|isCamera|renderer)\b/, 'never touch the camera or renderer: the headset owns the viewpoint'],
-  [/\b(innerHTML|outerHTML|insertAdjacentHTML|postMessage|createObjectURL)\b/, 'no DOM or messaging'],
-  [/(?<![\w$.])(alert|confirm|prompt|open)\s*\(/, 'no dialogs or popups'],
-  [/\bwhile\s*\(\s*(true|1|!0)\s*\)|\bfor\s*\(\s*;\s*;\s*\)/, 'no infinite loops'],
+  [/\bimport\b/g, 'no imports: THREE is passed into create()', 'any'],
+  [/\brequire\s*\(/g, 'no require()', 'any'],
+  [/\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|RTCPeerConnection|importScripts|SharedWorker|Worker|FontFace|BroadcastChannel|WebTransport|addModule)\b/g, 'no network or workers', 'any'],
+  [/\b\w*Loader\b|\bload(Async)?\s*\(/g, 'no loaders: build everything in code (loaders make network requests)', 'any'],
+  [/\beval\b/g, 'no eval', 'any'],
+  [/\bFunction\b/g, 'no Function', 'any'],
+  [/\bconstructor\b|\b__proto__\b|\b(getPrototypeOf|setPrototypeOf|Reflect|Proxy)\b/g, 'no constructor, prototype or Reflect/Proxy tricks', 'any'],
+  [/\b(setTimeout|setInterval|requestAnimationFrame|requestIdleCallback|queueMicrotask)\b/g, 'no timers: animate with addUpdate((dt, t) => ...)', 'any'],
+  [/\b(localStorage|sessionStorage|indexedDB|cookieStore|cookie|caches)\b/g, 'no storage or cookies', 'any'],
+  [/\b(window|globalThis|navigator|clientInformation|process)\b/g, 'no browser or host globals', 'any'],
+  [/\b(ownerDocument|defaultView|getRootNode|parentNode|parentElement|ownerElement|contentWindow|contentDocument|documentElement|baseURI)\b/g, 'no reaching into the page from a canvas', 'any'],
+  [/\b(self|location|top|parent|opener|frames|Image|Audio)\b/g, 'no browser globals', 'bare'],
+  [/\b(camera|Camera|isCamera|renderer)\b/g, 'never touch the camera or renderer: the headset owns the viewpoint', 'any'],
+  [/\b(innerHTML|outerHTML|insertAdjacentHTML|postMessage|createObjectURL)\b/g, 'no DOM or messaging', 'any'],
+  [/\b(alert|confirm|prompt|open)\s*\(/g, 'no dialogs or popups', 'bare'],
+  [/\bBatchedMesh\b/g, 'no BatchedMesh: use InstancedMesh for repeats', 'any'],
+  [/\bwhile\s*\(\s*(true|1|!0)\s*\)|\bfor\s*\(\s*;\s*;\s*\)/g, 'no infinite loops', 'any'],
 ];
+// Words with no innocent use, checked in the raw source (strings and comments included), so a scanner slip can't hide them.
+const RAW_BANNED = /\b(ownerDocument|defaultView|getRootNode|localStorage|sessionStorage|globalThis|XMLHttpRequest|sendBeacon)\b|dreamspace\.token/;
 
 const lineAt = (s, idx) => s.slice(0, idx).split('\n').length;
+
+const prevNonSpace = (s, i) => { let j = i - 1; while (j >= 0 && /\s/.test(s[j])) j--; return j; };
+const nextNonSpace = (s, i) => { let j = i; while (j < s.length && /\s/.test(s[j])) j++; return j; };
+/** `{ name: …` or `, name: …`: a property definition (not `a ? name : b`, not `case name:`). */
+function isPropertyKey(code, start, end) {
+  const p = prevNonSpace(code, start), q = nextNonSpace(code, end);
+  return code[q] === ':' && (code[p] === '{' || code[p] === ',');
+}
+/** `obj.name` / `obj?.name`, but not the spread `...name`. */
+function isMemberAccess(code, start) {
+  const p = prevNonSpace(code, start);
+  return code[p] === '.' && !(code[p - 1] === '.' && code[p - 2] === '.');
+}
 
 /** Returns a list of human-readable problems (empty = clean). */
 export function lintCreation(src) {
   const errors = [];
   if (!src.trim()) return ['the file is empty'];
-  const code = stripCode(src);
-  for (const [re, why] of BANNED) {
-    const m = re.exec(code);
-    if (m) errors.push(`line ${lineAt(code, m.index)}: \`${m[0].trim()}\`: ${why}`);
+  const { code, error: scanError } = scanCode(src);
+  if (scanError) errors.push(`${scanError} (the checker could not read the file safely; keep strings and regexes on one line)`);
+  const raw = RAW_BANNED.exec(src);
+  if (raw) errors.push(`line ${lineAt(src, raw.index)}: \`${raw[0]}\`: not allowed anywhere in a creation, not even in a string or comment`);
+  // names the file declares itself (`const top = …`, `function open(…)`): those aren't the browser globals
+  const declared = new Set([...code.matchAll(/\b(?:const|let|var|function|class)\s+([\w$]+)/g)].map((m) => m[1]));
+  for (const [re, why, scope] of BANNED) {
+    re.lastIndex = 0;
+    for (const m of code.matchAll(re)) {
+      const word = /^[\w$]+/.exec(m[0])?.[0] || m[0];
+      if (scope === 'bare' && (declared.has(word) || isMemberAccess(code, m.index) || isPropertyKey(code, m.index, m.index + word.length))) continue;
+      errors.push(`line ${lineAt(code, m.index)}: \`${m[0].trim()}\`: ${why}`);
+      break;
+    }
   }
   for (const m of code.matchAll(/\bdocument\b/g)) {
     if (!/^document\s*\.\s*createElement\s*\(\s*(['"`])canvas\1\s*\)/.test(src.slice(m.index))) {
@@ -233,24 +310,53 @@ async function syntaxCheck(file, name, st) {
 
 // ---- the sandbox runner (written to <dataDir>/vibe/sandbox/runner.mjs) ----
 const RUNNER = String.raw`// Generated by server/vibe.mjs: runs one creation against three.js inside a Node permission sandbox.
-const [threeUrl, fileUrl, worldFile, slug, limitsJson] = process.argv.slice(2);
+const [threeUrl, fileUrl, worldFile, slug, limitsJson, marker] = process.argv.slice(2);
 const LIMITS = JSON.parse(limitsJson);
 const report = { ok: true, errors: [], warnings: [], stats: {} };
-const emit = () => process.stdout.write('\n@@VIBE@@' + JSON.stringify(report) + '\n');
+// The report goes out with a per-run random marker the creation never sees, through a write captured before the
+// creation loads, and console.* is silenced: a creation can't print a forged "ok" report.
+const out = process.stdout.write.bind(process.stdout);
+const exit = process.exit.bind(process);
+const emit = () => out('\n' + marker + JSON.stringify(report) + '\n');
 const where = (e) => { const m = new RegExp(slug.replace(/[-]/g, '\\-') + '\\.mjs:(\\d+)').exec(String(e && e.stack)); return m ? ' (line ' + m[1] + ')' : ''; };
 const msg = (e) => String((e && e.message) || e).split('\n')[0].slice(0, 300);
-const fail = (s) => { report.ok = false; report.errors.push(s); emit(); process.exit(0); };
+const fail = (s) => { report.ok = false; report.errors.push(s); emit(); exit(0); };
 process.on('uncaughtException', (e) => fail('uncaught error: ' + msg(e) + where(e)));
 process.on('unhandledRejection', (e) => fail('unhandled rejection: ' + msg(e) + where(e)));
+const noop = () => {};
+for (const k of ['log', 'info', 'warn', 'error', 'debug', 'trace', 'dir', 'table']) console[k] = noop;
+
+// Anything that reaches from a canvas or document back into the page (and so to storage, the token or the network)
+// is recorded, however the property name was spelled (c['owner' + 'Document'] included). Recorded, not thrown,
+// so a try/catch in the creation can't swallow it.
+const ESCAPES = new Set(['ownerDocument', 'defaultView', 'getRootNode', 'parentNode', 'parentElement', 'ownerElement', 'baseURI',
+  'contentWindow', 'contentDocument', 'documentElement', 'body', 'head', 'cookie', 'location', 'domain', 'URL', 'documentURI',
+  'referrer', 'defaultView', 'querySelector', 'querySelectorAll', 'getElementById', 'getElementsByTagName', 'forms', 'scripts',
+  'images', 'links', 'open', 'write', 'writeln', 'implementation', 'fonts', 'currentScript', 'constructor', '__proto__']);
+const escaped = new Set();
+const trap = (what, k) => {
+  const key = String(k);
+  if (!ESCAPES.has(key) || escaped.has(what + '.' + key)) return;
+  escaped.add(what + '.' + key);
+  report.ok = false;
+  report.errors.push('reads ' + what + '.' + key + ': a creation may only draw on its canvas, never reach the page, storage or the network');
+};
+const guard = (what, target) => new Proxy(target, {
+  get(t, k, r) { trap(what, k); return Reflect.get(t, k, r); },
+  getOwnPropertyDescriptor(t, k) { trap(what, k); return Reflect.getOwnPropertyDescriptor(t, k); },
+  getPrototypeOf(t) { trap(what, '__proto__'); return Reflect.getPrototypeOf(t); },
+});
 
 // Canvas stand-ins, so CanvasTexture recipes work without a DOM.
-const noop = () => {};
 const grad = { addColorStop: noop };
 function makeCanvas(w = 300, h = 150) {
-  const c = { width: w, height: h, style: {}, addEventListener: noop, removeEventListener: noop, toDataURL: () => 'data:,' };
-  const ctx = new Proxy({ canvas: c }, {
+  const c = { width: w, height: h, style: {}, addEventListener: noop, removeEventListener: noop, toDataURL: () => 'data:image/png;base64,iVBORw0KGgo=' };
+  const pc = guard('canvas', c);
+  const ctx = new Proxy({}, {
     get(t, k) {
+      if (k === 'canvas') return pc;
       if (k in t) return t[k];
+      trap('context', k);
       if (k === 'createRadialGradient' || k === 'createLinearGradient' || k === 'createConicGradient' || k === 'createPattern') return () => grad;
       if (k === 'measureText') return (s) => ({ width: String(s).length * 8, actualBoundingBoxAscent: 8, actualBoundingBoxDescent: 2 });
       if (k === 'getImageData' || k === 'createImageData') return (a, b, cw, ch) => { const W = cw || a || 1, H = ch || b || 1; return { width: W, height: H, data: new Uint8ClampedArray(W * H * 4) }; };
@@ -260,14 +366,23 @@ function makeCanvas(w = 300, h = 150) {
       return noop;
     },
     set(t, k, v) { t[k] = v; return true; },
+    getPrototypeOf() { trap('context', '__proto__'); return Object.prototype; },
   });
   c.getContext = () => ctx;
-  return c;
+  return pc;
 }
-globalThis.document = { createElement: (tag) => (String(tag).toLowerCase() === 'canvas' ? makeCanvas() : { style: {}, appendChild: noop }), createElementNS: (ns, tag) => makeCanvas() };
+globalThis.document = guard('document', { createElement: (tag) => (String(tag).toLowerCase() === 'canvas' ? makeCanvas() : { style: {}, appendChild: noop }), createElementNS: (ns, tag) => makeCanvas() });
 globalThis.OffscreenCanvas = class { constructor(w, h) { return makeCanvas(w, h); } };
 
 const THREE = await import(threeUrl);
+// Reaching the Function constructor through any function (fn['const' + 'ructor'], async/generator ones too) is recorded,
+// even when the creation catches the EvalError that --disallow-code-generation-from-strings raises here.
+for (const p of [Function.prototype, Object.getPrototypeOf(async function () {}), Object.getPrototypeOf(function* () {}), Object.getPrototypeOf(async function* () {})]) {
+  const real = p.constructor;
+  Object.defineProperty(p, 'constructor', { configurable: true, get() { trap('function', 'constructor'); return real; } });
+}
+// Drain promise jobs, so work a creation defers with .then / await runs here too, as it would in the browser.
+const settle = () => new Promise((r) => setImmediate(r));
 let mod;
 try { mod = await import(fileUrl); } catch (e) { fail('could not load: ' + msg(e) + where(e)); }
 if (typeof mod.default !== 'function') fail('the default export must be a function create({ THREE, scene, room, world, addUpdate })');
@@ -281,63 +396,95 @@ const updates = [];
 const addUpdate = (fn) => { if (typeof fn === 'function') updates.push(fn); };
 let root;
 try { root = mod.default({ THREE, scene, room, world, addUpdate }); } catch (e) { fail('create() threw: ' + msg(e) + where(e)); }
+await settle();
 if (root && typeof root.then === 'function') fail('create() must return an Object3D synchronously (not a Promise)');
 if (!root || !root.isObject3D) fail('create() must return one THREE.Object3D (for example a Group) holding everything it made');
 if (root.parent !== scene && root.parent !== room) scene.add(root);
 if (scene.children.length > 2) report.warnings.push('create() added objects to scene/room directly; return them inside the root instead');
 if (updates.length > LIMITS.updates) fail('registered ' + updates.length + ' updates; use one addUpdate for the whole creation');
 
+// Budget, counted by CAPACITY over EVERY object (hidden ones too): an InstancedMesh counts all the instances it
+// was built for, whatever .count says now; a geometry counts its whole index/position buffer, whatever its drawRange
+// says now. So a creation can't pass small and grow (count, drawRange, visible) later. Measured at several points.
+const peak = { drawCalls: 0, triangles: 0, points: 0, meshes: 0, instances: 0, lights: 0, shadows: 0, transmission: 0, maxTex: 0, batched: 0 };
+function measure() {
+  scene.updateMatrixWorld(true);
+  const s = { drawCalls: 0, triangles: 0, points: 0, meshes: 0, instances: 0, lights: 0, shadows: 0, transmission: 0, maxTex: 0, batched: 0 };
+  scene.traverse((o) => {
+    if (o.isLight) s.lights++;
+    if (o.castShadow || o.receiveShadow) s.shadows++;
+    if (o.isBatchedMesh) s.batched++;
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+    for (const m of mats) {
+      if (m.transmission > 0) s.transmission++;
+      for (const k of Object.keys(m)) { const v = m[k]; if (v && v.isTexture && v.image && v.image.width) s.maxTex = Math.max(s.maxTex, v.image.width, v.image.height); }
+    }
+    const g = o.geometry;
+    if (!g || !g.attributes) { if (o.isSprite) { s.drawCalls++; s.triangles += 2; } return; }
+    const pos = g.attributes.position ? g.attributes.position.count : 0;
+    const base = g.index ? g.index.count : pos;
+    let inst = 1;
+    if (o.isInstancedMesh) inst = Math.max(o.count || 0, o.instanceMatrix ? o.instanceMatrix.count : 0);
+    if (g.isInstancedBufferGeometry) {
+      let cap = 0;
+      for (const k of Object.keys(g.attributes)) { const a = g.attributes[k]; if (a && a.isInstancedBufferAttribute) cap = Math.max(cap, a.count); }
+      const ic = Number.isFinite(g.instanceCount) ? g.instanceCount : 0;
+      inst *= Math.max(1, cap, ic);
+    }
+    if (o.isMesh) {
+      s.meshes++;
+      if (o.isInstancedMesh) s.instances += inst;
+      s.drawCalls += Array.isArray(o.material) ? Math.max(1, g.groups.length) : 1;
+      s.triangles += Math.floor(base / 3) * inst;
+    } else if (o.isPoints) { s.drawCalls++; s.points += pos * inst; }
+    else if (o.isLine) s.drawCalls++;
+    else if (o.isSprite) { s.drawCalls++; s.triangles += 2; }
+  });
+  for (const k of Object.keys(peak)) peak[k] = Math.max(peak[k], s[k]);
+}
+
 const dt = 1 / 72;
 let t = 0, measured = 0, t0 = 0;
-for (let i = 0; i < 120; i++) {
-  t += dt;
-  if (i === 60) t0 = performance.now();
+const step = (i) => {
   for (const fn of updates) {
     try { fn(dt, t); } catch (e) { fail('an update threw at frame ' + i + ': ' + msg(e) + where(e)); }
   }
+};
+measure();
+for (let i = 0; i < 120; i++) {
+  t += dt;
+  if (i === 60) { t0 = performance.now(); }
+  step(i);
+  if (i === 59) measure();
 }
 measured = (performance.now() - t0) / 60;
+await settle();
+measure();
+// A few frames far in the future, so "after a while" behaviour is seen too.
+for (const later of [10, 60, 600]) { t = later; for (let j = 0; j < 3; j++) { t += dt; step('t=' + later); } }
+await settle();
+measure();
 
-scene.updateMatrixWorld(true);
-let drawCalls = 0, triangles = 0, points = 0, lights = 0, shadows = 0, transmission = 0, maxTex = 0, meshes = 0, instances = 0;
-scene.traverseVisible((o) => {
-  if (o.isLight) lights++;
-  if (o.castShadow || o.receiveShadow) shadows++;
-  const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
-  for (const m of mats) {
-    if (m.transmission > 0) transmission++;
-    for (const k of Object.keys(m)) { const v = m[k]; if (v && v.isTexture && v.image && v.image.width) maxTex = Math.max(maxTex, v.image.width, v.image.height); }
-  }
-  const g = o.geometry;
-  if (o.isMesh && g) {
-    meshes++;
-    const base = g.index ? g.index.count : (g.attributes.position ? g.attributes.position.count : 0);
-    const inst = o.isInstancedMesh ? o.count : 1;
-    if (o.isInstancedMesh) instances += o.count;
-    drawCalls += Array.isArray(o.material) ? Math.max(1, g.groups.length) : 1;
-    triangles += Math.floor(Math.min(base, g.drawRange.count) / 3) * inst;
-  } else if (o.isSprite) { drawCalls++; triangles += 2; }
-  else if (o.isPoints && g) { drawCalls++; points += Math.min(g.attributes.position ? g.attributes.position.count : 0, g.drawRange.count); }
-  else if (o.isLine) drawCalls++;
-});
 const box = new THREE.Box3().setFromObject(root);
 const r = (v) => Math.round(v * 100) / 100;
+const { drawCalls, triangles, points, meshes, instances, lights, shadows, transmission, maxTex, batched } = peak;
 report.stats = { drawCalls, triangles, points, meshes, instances, updates: updates.length, msPerFrame: r(measured), maxTexture: maxTex,
   bbox: box.isEmpty() ? null : { min: box.min.toArray().map(r), max: box.max.toArray().map(r) } };
 const E = (s) => { report.ok = false; report.errors.push(s); };
-if (lights) E('adds ' + lights + ' light(s): no lights allowed; fake glow with MeshBasicMaterial, emissive and additive sprites');
+if (lights) E('adds ' + lights + ' light(s) (hidden ones count too): no lights allowed; fake glow with MeshBasicMaterial, emissive and additive sprites');
 if (shadows) E('uses castShadow/receiveShadow: no shadows allowed');
 if (transmission) E('uses material.transmission: not allowed (too expensive in the headset)');
+if (batched) E('uses BatchedMesh: use InstancedMesh for repeats');
 if (drawCalls === 0) E('nothing visible was created');
-if (drawCalls > LIMITS.drawCalls) E(drawCalls + ' draw calls (limit ' + LIMITS.drawCalls + '): merge parts or use InstancedMesh for repeats');
-if (triangles > LIMITS.triangles) E(triangles + ' triangles (limit ' + LIMITS.triangles + '): lower the segment counts');
-if (points > LIMITS.points) E(points + ' points (limit ' + LIMITS.points + ')');
+if (drawCalls > LIMITS.drawCalls) E(drawCalls + ' draw calls, hidden objects included (limit ' + LIMITS.drawCalls + '): merge parts or use InstancedMesh for repeats');
+if (triangles > LIMITS.triangles) E(triangles + ' triangles at full capacity, hidden objects included (limit ' + LIMITS.triangles + '): lower the segment counts or the instance count');
+if (points > LIMITS.points) E(points + ' points at full capacity (limit ' + LIMITS.points + ')');
 if (maxTex > LIMITS.textureSize) E('a ' + maxTex + ' px texture (limit ' + LIMITS.textureSize + ')');
 if (measured > LIMITS.msPerFrame) E('updates take ' + r(measured) + ' ms per frame (limit ' + LIMITS.msPerFrame + '): allocate nothing per frame, do less work');
 else if (measured > 0.6) report.warnings.push('updates are heavy (' + r(measured) + ' ms per frame)');
 if (report.stats.bbox && report.stats.bbox.min.concat(report.stats.bbox.max).some((v) => !Number.isFinite(v))) E('positions became NaN or infinite during the updates');
 emit();
-process.exit(0);
+exit(0);
 `;
 
 async function ensureThree(st) {
@@ -380,6 +527,7 @@ async function runtimeCheck(st, three, file, slug, world) {
   if (current !== RUNNER) writeFileSync(runner, RUNNER);
   const chk = join(sandbox, `chk-${Date.now().toString(36)}-${randomBytes(3).toString('hex')}`);
   mkdirSync(chk);
+  const marker = `@@VIBE-${randomBytes(12).toString('hex')}@@`;
   try {
     const copy = join(chk, `${slug}.mjs`);
     writeFileSync(copy, readFileSync(file));
@@ -387,11 +535,12 @@ async function runtimeCheck(st, three, file, slug, world) {
     const r = await run(process.execPath, [
       '--permission', `--allow-fs-read=${three.dir}`, `--allow-fs-read=${runner}`, `--allow-fs-read=${chk}`,
       '--disallow-code-generation-from-strings', '--max-old-space-size=256', '--no-warnings',
-      runner, three.url, pathToFileURL(copy).href, join(chk, 'world.json'), slug, JSON.stringify(LIMITS),
+      runner, three.url, pathToFileURL(copy).href, join(chk, 'world.json'), slug, JSON.stringify(LIMITS), marker,
     ], { timeoutMs: 8000, envVars: {} });
-    const i = r.out.lastIndexOf('@@VIBE@@');
-    if (i >= 0) {
-      try { return JSON.parse(r.out.slice(i + 8).split('\n')[0]); } catch {}
+    // Trust the report only from a clean exit, and only under this run's secret marker.
+    const i = r.out.lastIndexOf(marker);
+    if (i >= 0 && r.code === 0 && !r.timedOut) {
+      try { return JSON.parse(r.out.slice(i + marker.length).split('\n')[0]); } catch {}
     }
     if (r.timedOut) return { ok: false, errors: ['create() or an update never finished (an endless loop?)'], warnings: [], stats: {} };
     const why = (r.err.split('\n').find((l) => /Error|error/.test(l)) || r.err.trim().split('\n')[0] || `exit ${r.code}`)
@@ -428,6 +577,13 @@ export async function validateCreationFile(file, { st, ctx, world } = {}) {
 // =====================================================================================================
 // The Claude Code session: one long-lived `claude -p` stream-json process, resumable across restarts.
 // =====================================================================================================
+
+const alive = (cp) => cp.exitCode === null && cp.signalCode === null;
+/** Resolves when `cp` has exited (at most ~4.5 s: kill() escalates to SIGKILL after 3 s). */
+function waitExit(cp) {
+  if (!cp || !alive(cp)) return Promise.resolve();
+  return new Promise((r) => { cp.once('exit', () => r()); setTimeout(r, 4500).unref(); });
+}
 
 // Exported as VibeClaudeSession for the sandbox probe test (same argv as production; only the appended prompt differs).
 export class VibeClaudeSession {
@@ -491,7 +647,9 @@ export class VibeClaudeSession {
         clearTimeout(timer); this.waiter = null;
         resolveTurn({ resumed, sawOutput: this.sawOutput, tools, denials: [], ...r });
       };
-      const timer = setTimeout(() => { this.kill(); finish({ kind: 'timeout' }); }, Math.max(5000, timeoutMs));
+      // On a timeout, resolve only once the child has really exited (SIGTERM, SIGKILL after 3 s): a Write landing in
+      // the shutdown window must be in the post-turn snapshot, so it gets validated (or rolled back) like any other.
+      const timer = setTimeout(() => { waitExit(this.kill()).then(() => finish({ kind: 'timeout' })); }, Math.max(5000, timeoutMs));
       this.waiter = {
         onMessage: (m) => {
           if (m.type === 'assistant') {
@@ -517,18 +675,14 @@ export class VibeClaudeSession {
   kill() {
     const cp = this.cp;
     this.cp = null;
-    if (cp && cp.exitCode === null) {
+    if (cp && alive(cp)) {
       cp.kill('SIGTERM');
-      setTimeout(() => { if (cp.exitCode === null) cp.kill('SIGKILL'); }, 3000).unref();
+      setTimeout(() => { if (alive(cp)) cp.kill('SIGKILL'); }, 3000).unref();
     }
     return cp;
   }
 
-  close() {
-    const cp = this.kill();
-    if (!cp || cp.exitCode !== null) return Promise.resolve();
-    return new Promise((r) => { cp.once('exit', r); setTimeout(r, 4000).unref(); });
-  }
+  close() { return waitExit(this.kill()); }
 
   reset() { this.kill(); this.sid = null; this.saveSid(); }
 }

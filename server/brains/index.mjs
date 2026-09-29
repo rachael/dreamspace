@@ -17,7 +17,7 @@
 //     and claude sits out for a while so the next turns go straight to the local brain.
 //   - claude errors after it may have touched the world   -> no fallback (it could have applied ops through MCP;
 //     a second brain would do it twice). Its own friendly reply stands.
-// Replies are cleaned for speech (no markdown or emoji, two short sentences; three for claude) and ops are clamped
+// Replies are cleaned for speech (no markdown or emoji, at most two short sentences, handoff line included) and ops are clamped
 // to the contract, so a brain can never send the server something it would reject.
 //
 // Also exported for convenience: BRAIN_NAMES, getBrains(ctx) (shared instance), pickBrain, respond, brainHealth,
@@ -32,15 +32,22 @@ const LOADERS = {
   ollama: () => import('./ollama.mjs'),
   scripted: () => import('./scripted.mjs'),
 };
-const HARD_TIMEOUT_MS = { claude: 90_000, ollama: 45_000, scripted: 5_000 };
+// app.mjs abandons a turn after BRAIN_TIMEOUT_MS (75 s by default). Our own limits stay below it, so the fallback here
+// runs (and a late claude turn is written off) before app gives up and speaks its timeout line.
+const APP_TIMEOUT_MARGIN_MS = 5_000;
+const HARD_TIMEOUT_MS = { claude: 70_000, ollama: 45_000, scripted: 5_000 };
 const CHECK_TIMEOUT_MS = { claude: 12_000, ollama: 3_000, scripted: 1_000 };
 const FRESH_MS = { claude: 20_000, ollama: 5_000, scripted: Infinity };
+// How claude says it can't answer. An explicit res.error / res.reason tag wins. Without one, only claude-code.mjs's own
+// canned lines count (anchored to the start of the reply), so a normal answer that merely mentions "usage limit" or
+// "staying quiet" never benches claude. Drop the regexes once claude-code.mjs returns the tag itself.
 const GIVE_UP = [
-  { re: /usage limit|reached my .*limit|until it resets/i, why: 'limit', coolMs: 10 * 60_000 },
-  { re: /can't reach claude|cannot reach claude|not logged in/i, why: 'offline', coolMs: 60_000 },
-  { re: /doesn't look right|staying quiet/i, why: 'unsafe', coolMs: 5 * 60_000 },
-  { re: /local guide can (take over|help)/i, why: 'unavailable', coolMs: 60_000 },
+  { re: /^I've reached my Claude usage limit for now\./i, why: 'limit', coolMs: 10 * 60_000 },
+  { re: /^I can't reach Claude right now\./i, why: 'offline', coolMs: 60_000 },
+  { re: /^Something about my link to this world doesn't look right, so I'm staying quiet\./i, why: 'unsafe', coolMs: 5 * 60_000 },
+  { re: /^$/, why: 'unavailable', coolMs: 60_000 }, // tag-only
 ];
+const REPLY_LIMITS = { maxSentences: 2, maxChars: 300 }; // contract: at most two short spoken sentences, every brain
 const HANDOFF = {
   limit: 'Claude needs a little rest, so I will think locally for now.',
   offline: "I can't reach Claude just now, so I'm thinking locally.",
@@ -59,6 +66,11 @@ const normName = (n) => {
   return s === 'auto' || BRAIN_NAMES.includes(s) ? s : undefined;
 };
 
+/** The handoff line plus the local brain's reply, cleaned again so the whole thing is still two sentences. */
+function withHandoff(line, reply) {
+  return cleanReply(`${line} ${reply}`, REPLY_LIMITS) || line;
+}
+
 function withTimeout(promise, ms, onTimeout) {
   let timer;
   return Promise.race([
@@ -75,6 +87,8 @@ export async function createBrains(ctx = {}) {
   const env = ctx.env || process.env;
   const log = (...a) => (typeof ctx.log === 'function' ? ctx.log : console.log)('[brains]', ...a);
   const loaders = { ...LOADERS, ...(ctx.loaders || {}) }; // tests can inject fake brains
+  const appTimeout = Number(env.BRAIN_TIMEOUT_MS) || Number(ctx.brainTimeoutMs) || 75_000;
+  const hardTimeout = (n) => Math.max(1_000, Math.min(HARD_TIMEOUT_MS[n], appTimeout - APP_TIMEOUT_MARGIN_MS));
   const enabled = new Set(String(env.BRAINS || BRAIN_NAMES.join(',')).split(',').map(normName).filter((n) => BRAIN_NAMES.includes(n)));
   enabled.add('scripted'); // the offline brain is always there
 
@@ -180,7 +194,7 @@ export async function createBrains(ctx = {}) {
   // ---- answering ------------------------------------------------------------------------------------------------
   function finalize(name, res, world, extra = {}) {
     const raw = typeof res === 'string' ? res : res?.reply ?? res?.text ?? '';
-    const reply = cleanReply(raw, name === 'claude' ? { maxSentences: 3, maxChars: 420 } : { maxSentences: 2, maxChars: 300 });
+    const reply = cleanReply(raw, REPLY_LIMITS);
     const ops = sanitizeOps(Array.isArray(res?.ops) ? res.ops : [], world);
     const tools = Array.isArray(res?.tools) ? { tools: res.tools } : {}; // claude: which world tools it used
     return { reply: reply || (ops.length ? 'There you go.' : SAFE_REPLY), ops, brain: name, ...tools, ...extra };
@@ -192,7 +206,7 @@ export async function createBrains(ctx = {}) {
       const b = await load(n);
       if (!b) continue;
       try {
-        const res = await withTimeout(b.respond(input), HARD_TIMEOUT_MS[n]);
+        const res = await withTimeout(b.respond(input), hardTimeout(n));
         if (res && (typeof res === 'string' || typeof res.reply === 'string')) return { name: n, res };
         throw new Error('empty answer');
       } catch (e) {
@@ -225,7 +239,7 @@ export async function createBrains(ctx = {}) {
       const local = await runLocal(['ollama', 'scripted'], input, `claude ${c.why}`);
       if (local) {
         const out = finalize(local.name, local.res, world, { fallbackFrom: 'claude', detail: c.why });
-        if (!c.announced && HANDOFF[c.why]) { out.reply = `${HANDOFF[c.why]} ${out.reply}`; c.announced = true; }
+        if (!c.announced && HANDOFF[c.why]) { out.reply = withHandoff(HANDOFF[c.why], out.reply); c.announced = true; }
         return done(out);
       }
     }
@@ -233,7 +247,7 @@ export async function createBrains(ctx = {}) {
     const brain = await load(name);
     let res = null, error = null;
     if (brain) {
-      try { res = await withTimeout(brain.respond(input), HARD_TIMEOUT_MS[name]); } catch (e) { error = e; }
+      try { res = await withTimeout(brain.respond(input), hardTimeout(name)); } catch (e) { error = e; }
     } else error = new Error('not loaded');
 
     if (name === 'claude') {
@@ -241,7 +255,8 @@ export async function createBrains(ctx = {}) {
       const quiet = !res || !Array.isArray(res.tools) || res.tools.length === 0;
       // an explicit res.error / res.reason ('limit' | 'offline' | 'unsafe') wins; else recognise its friendly lines
       const tag = String(res?.error ?? res?.reason ?? '');
-      const gaveUp = !error && res && quiet ? (GIVE_UP.find((g) => g.why === tag) || GIVE_UP.find((g) => g.re.test(String(res.reply ?? '')))) : null;
+      const said = String(res?.reply ?? '').trim();
+      const gaveUp = !error && res && quiet ? (GIVE_UP.find((g) => g.why === tag) || (said && GIVE_UP.find((g) => g.re.test(said)))) : null;
       if (gaveUp || (error && !brain)) {
         const why = gaveUp ? gaveUp.why : 'error';
         const prev = cooldown.get('claude');
@@ -252,7 +267,7 @@ export async function createBrains(ctx = {}) {
         if (local) {
           const c = cooldown.get('claude');
           const out = finalize(local.name, local.res, world, { fallbackFrom: 'claude', detail: why });
-          if (!c.announced && HANDOFF[why]) { out.reply = `${HANDOFF[why]} ${out.reply}`; c.announced = true; }
+          if (!c.announced && HANDOFF[why]) { out.reply = withHandoff(HANDOFF[why], out.reply); c.announced = true; }
           return done(out);
         }
       }

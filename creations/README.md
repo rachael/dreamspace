@@ -69,12 +69,16 @@ The validator measures every creation and **rejects** it past the hard limits:
 
 | | Aim for | Hard limit |
 |---|---|---|
-| Draw calls (each visible Mesh, Points, Line or Sprite is 1; an InstancedMesh is 1 for all its copies) | ≤ 8 | 16 |
-| Triangles (instances count) | ≤ 20k | 50k |
+| Draw calls (each Mesh, Points, Line or Sprite is 1; an InstancedMesh is 1 for all its copies) | ≤ 8 | 16 |
+| Triangles (every instance an InstancedMesh was built for counts) | ≤ 20k | 50k |
 | Points (particles) | ≤ 2,000 | 5,000 |
 | Lights, `castShadow`/`receiveShadow`, `transmission` | none | none |
 | File size | small | 64 KB |
 
+- **Everything counts at full size, hidden or not.** An InstancedMesh counts every instance it was created with, even if you
+  set `count` lower and grow it later ("stars appear one by one" is fine, but the full set must fit the budget). A geometry
+  counts its whole buffer whatever its `drawRange`. Objects with `visible = false` count too. The viewer keeps measuring
+  live creations, and one that grows past the budget later (or adds a light) is hidden.
 - Many copies of one thing (lanterns, stars, petals): **one `THREE.InstancedMesh`** per part, not a loop of meshes.
   Low segment counts: spheres 12 to 16 wide, cylinders 8 to 16 sides.
 - Share geometries and materials between copies. Canvas textures at most 256 px.
@@ -92,18 +96,28 @@ The validator measures every creation and **rejects** it past the hard limits:
 
 ## Banned (the validator rejects the file)
 
-Checked in code (comments and strings are ignored):
+Checked in code (comments, strings and regex literals are ignored):
 `import` (static or dynamic), `require`, `export` of anything but the default `create`, `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`,
-`sendBeacon`, `eval`, `Function(`, `setTimeout`, `setInterval`, `requestAnimationFrame`, `localStorage`, `sessionStorage`, `indexedDB`,
-`cookie`, `window`, `globalThis`, `self`, `location`, `navigator`, `process`, `camera`, `renderer`, `innerHTML`, `postMessage`,
-`while (true)` and `for (;;)`, and `document` except `document.createElement('canvas')`.
+`sendBeacon`, `Worker`, `FontFace`, any `…Loader` (`TextureLoader`, `ImageLoader`, `FileLoader`, …) and any `.load(` call, `eval`, `Function(`,
+`constructor` (so no `class` with a constructor: use plain functions), `__proto__`, `getPrototypeOf`, `Reflect`, `Proxy`,
+`setTimeout`, `setInterval`, `requestAnimationFrame`, `queueMicrotask`, `localStorage`, `sessionStorage`, `indexedDB`, `cookie`, `caches`,
+`window`, `globalThis`, `navigator`, `process`, `opener`, `frames`, `ownerDocument`, `defaultView`, `getRootNode`, `parentNode`,
+`parentElement`, `camera`, `renderer`, `innerHTML`, `postMessage`, `BatchedMesh`, `while (true)` and `for (;;)`,
+and `document` except `document.createElement('canvas')`.
+The browser globals `self`, `location`, `top`, `Image`, `Audio`, `open(`, `alert(` are banned too unless you declare a local of that
+name yourself (`const top = …` is fine) or use it as a property (`obj.top`, `{ top: 1 }`).
+A few words are rejected even inside strings and comments: `ownerDocument`, `defaultView`, `getRootNode`, `localStorage`,
+`sessionStorage`, `globalThis`, `XMLHttpRequest`, `sendBeacon`. Keep every string and regex on one line.
+
+The sandbox run also rejects any creation that reaches from its canvas or `document` back into the page
+(`canvas.ownerDocument` and friends), however the property name is spelled.
 
 Never move, rotate or look for the camera: the headset owns the viewpoint.
 
 ## After the validator
 
-The server checks every file you change (syntax, the banned list, then it actually runs `create()` and 120 frames of your updates
-against three r186 in a sandbox and measures the budget). If it rejects something, it tells you why in the next message:
+The server checks every file you change (syntax, the banned list, then it actually runs `create()` and 120 frames of your updates,
+plus a few frames far in the future, against three r186 in a sandbox and measures the budget). If it rejects something, it tells you why in the next message:
 fix that file and keep the same slug. A file that still fails is rolled back, so the world never breaks.
 
 ## How to answer

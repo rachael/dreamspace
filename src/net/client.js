@@ -102,12 +102,15 @@ export function authHeaders(extra = {}) {
 // ---------------------------------------------------------------------------------------------------------------
 // Small request helper, shared with src/voice/index.js (whisper upload). Resolves, never rejects.
 
-const RETRYABLE = new Set([502, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530]); // proxy/tunnel: origin not reached
+// Proxy/tunnel errors. For a GET any of these is worth one retry. A POST is only retried when the request cannot have
+// reached the app (520/524/504 can mean it ran and only the answer was lost: a retried chat would be said twice).
+const RETRYABLE = new Set([502, 504, 520, 521, 522, 523, 524, 525, 526, 527, 530]);
+const NOT_DELIVERED = new Set([502, 521, 522, 523, 525, 526, 530]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * apiRequest('POST', '/api/chat', {json:{text}}) → {ok, status, data, error}
- * opts: {json, body, headers, base='', timeout=15000, retries (default: 1 for GET, 1 for tunnel 5xx on POST), signal, auth=true}
+ * opts: {json, body, headers, base='', timeout=15000, retries (default 1: GETs on network/tunnel errors, POSTs only when undelivered), signal, auth=true}
  */
 export async function apiRequest(method, path, opts = {}) {
   const { json, body, headers = {}, base = '', timeout = 15000, signal, auth = true } = opts;
@@ -127,7 +130,7 @@ export async function apiRequest(method, path, opts = {}) {
       const ct = res.headers.get('content-type') || '';
       let data = null;
       try { data = ct.includes('json') ? await res.json() : await res.text(); } catch { data = null; }
-      if (!res.ok && RETRYABLE.has(res.status) && attempt < retries) { await sleep(600 + attempt * 600); continue; }
+      if (!res.ok && (isGet ? RETRYABLE : NOT_DELIVERED).has(res.status) && attempt < retries) { await sleep(600 + attempt * 600); continue; }
       const error = res.ok ? null
         : (data && typeof data === 'object' && data.error) || (typeof data === 'string' && data.trim().slice(0, 200)) || `HTTP ${res.status}`;
       return { ok: res.ok, status: res.status, data, error };

@@ -299,7 +299,9 @@ const r2 = (n) => Math.round(n * 100) / 100;
  * Contract-shaped, clamped ops. Drops invalid ops instead of throwing. With a world, also drops move/remove of ids
  * that don't exist, duplicate removes, and adds beyond the 40-object limit. Unknown fields (like `where`) never leak.
  */
-export function sanitizeOps(ops, world, { max = 16 } = {}) {
+export const MAX_OPS = 12; // app.mjs applies at most 12 ops per turn (normalizeResult); never hand it more
+
+export function sanitizeOps(ops, world, { max = MAX_OPS } = {}) {
   if (!Array.isArray(ops)) return [];
   const w = world ? snapshot(world) : null;
   const ids = w ? new Set(w.objects.map((o) => o.id)) : null;
@@ -307,10 +309,24 @@ export function sanitizeOps(ops, world, { max = 16 } = {}) {
   const removed = new Set();
   const out = [];
   const str = (s, n) => (typeof s === 'string' ? cut(s, n) : '');
+  // A resize is a remove followed by an add that carries `replaces: <removed id>`. The pair is atomic: both fit
+  // or neither is emitted, so a cap can never delete an object without putting it back.
+  const pairOf = (op, next) => op && op.type === 'remove' && next && next.type === 'add' && next.replaces != null
+    && String(next.replaces) === String(op.id);
 
-  for (const op of ops) {
+  for (let k = 0; k < ops.length; k++) {
+    const op = ops[k];
     if (out.length >= max) break;
     if (!op || typeof op !== 'object') continue;
+    if (pairOf(op, ops[k + 1])) {
+      const id = str(op.id, 200);
+      const ok = id && !removed.has(id) && (!ids || ids.has(id));
+      if (!ok || out.length + 2 > max) { k++; continue; } // skip the whole pair
+    } else if (op.type === 'add' && op.replaces != null) {
+      // the other half of a pair whose remove was dropped: adding it would duplicate the object
+      const rid = String(op.replaces);
+      if (!removed.has(rid) && (!ids || ids.has(rid))) continue;
+    }
     switch (op.type) {
       case 'add': {
         const name = str(op.name, LIMITS.name);

@@ -27,6 +27,9 @@ const WHERE_ENUM = ['beside_user', 'in_front', 'far', 'above_user', 'sky', 'anyw
 // placements the scripted rules can read from the utterance, including a few the model has no word for
 const WHERE_ALL = [...WHERE_ENUM, 'behind_user', 'left', 'right', 'around_user'];
 const SIZE_WORDS = /\b(big|bigger|huge|giant|enormous|massive|large|larger|tall|towering|colossal|gigantic|small|smaller|tiny|little|mini|miniature|wee|teeny|scale|size)\b/;
+// A size request ("shrink all the trees") never moves anything, unless the user also named a place or a move verb.
+const RESIZE_WORDS = /\b(bigger|larger|huger|smaller|tinier|shrink\w*|enlarge\w*|taller|shorter|resiz\w*|scale (it |them )?(up|down)|twice as big|half the size|grow|grows)\b/;
+const MOVE_VERBS = /\b(move|bring|put|place|send|push|pull|shift|lift|raise|lower|slide|nudge|carry|drag|closer|further|farther|higher)\b/;
 const PRONOUNS = /\b(it|that|this|them|those|these|one|last|new|latest)\b/;
 // A mood op the model invents is kept only if the utterance is about the sky or the feel of the place.
 const MOOD_WORDS = /\b(sky|skies|mood|feel|feeling|vibe|atmosphere|ambien\w*|light|lights|lighting|dark\w*|bright\w*|dim\w*|glow\w*|fog\w*|mist\w*|haz\w*|colou?rs?|weather|night|day|dusk|dawn|twilight|aurora|stars?|starry|starfall|sea|ocean|underwater|deep|magic\w*|dream\w*|calm\w*|cozy|cosy|spooky|eerie|warm\w*|cold\w*|winter|summer|autumn|spring|rain\w*|snow\w*|storm\w*|sunset|sunrise|morning|evening|sad|happy|peaceful|relax\w*|soothing|moody|romantic|mysterious|cheerful|gloomy|lighter|surprise\w*|anything|something)\b/;
@@ -79,6 +82,7 @@ export function guard(text, ops, world) {
   if (isPureQuestion(text)) return { ops: [], dropped: ops.length };
   const clearOK = wantsClear(text);
   const mood = detectMood(text, w);
+  const sizeOnly = RESIZE_WORDS.test(t) && !MOVE_VERBS.test(t) && wheresIn(text).size === 0;
   const objectRequest = saidArch.size > 0 || /\b(add|summon|create|put|place|spawn|conjure|bring|build|plant|grow|open|light|launch)\b/.test(t);
 
   const out = [];
@@ -87,6 +91,7 @@ export function guard(text, ops, world) {
     if (op.type === 'clear') {
       if (!clearOK) { dropped++; continue; }
     } else if (op.type === 'remove' || op.type === 'move') {
+      if (op.type === 'move' && sizeOnly) { dropped++; continue; }
       const o = byId.get(op.id);
       if (!o) { dropped++; continue; }
       if (!mentions(o) && !pronounTarget(o)) {

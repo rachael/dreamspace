@@ -9,11 +9,12 @@
 import {
   ARCHETYPES, ARCH_INFO, MOOD_PRESETS, PRESETS, LIMITS, GUIDE_NAME,
   snapshot, objectArchetype, spokenName, relDirection, article, spokenList, wherePosition, clampPosition,
-  sanitizeOps, cleanReply,
+  sanitizeOps, cleanReply, MAX_OPS,
 } from './persona.mjs';
 
 const pick = (a) => a[Math.floor(Math.random() * a.length)];
 const cap = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const lc = (s) => (s && /^[A-Z](?:[a-z]|\s)/.test(s) ? s[0].toLowerCase() + s.slice(1) : s); // "Trees unfurl" -> "trees unfurl" mid-sentence
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 const r2 = (n) => Math.round(n * 100) / 100;
 const NUM_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'];
@@ -134,7 +135,9 @@ const FILLER_AFTER = new Set(['please', 'now', 'here', 'there', 'for', 'with', '
   'tonight', 'right', 'left', 'up', 'down', 'away', 'far', 'closer', 'glowing', 'light', 'lights', 'glow', 'bigger',
   'smaller', 'thanks', 'ok', 'okay', 'instead', 'somewhere', 'anywhere', 'everywhere', 'really', 'quickly', 'slowly',
   'softly', 'yeah', 'one', 'ones', 'well', 'just', 'for', 'if', 'or', 'but', 'is', 'are', 'was', 'be', 'floating',
-  'sky', 'overhead', 'nearby', 'ahead', 'behind', 'thank', 'more', 'all', 'everything']);
+  'sky', 'overhead', 'nearby', 'ahead', 'behind', 'thank', 'more', 'all', 'everything',
+  // verbs that often follow the noun ("make the trees vanish", "make the moon grow") are not part of it
+  'disappear', 'vanish', 'go', 'fade', 'shrink', 'grow', 'larger', 'taller', 'shorter', 'tinier', 'huger', 'enlarge']);
 
 /** Count, size, colour, definiteness and other adjectives from the words just before a noun. */
 function modifiers(before) {
@@ -158,7 +161,7 @@ function modifiers(before) {
   }
   if (count == null && win.some((w) => w === 'a' || w === 'an')) { count = 1; determiner = determiner || 'a'; }
   const definite = ['the', 'that', 'this', 'those', 'these', 'my', 'our', 'your'].includes(determiner);
-  return { count, countWord, scale, color, adjs, determiner, definite, all: win.includes('all') || win.includes('every') || win.includes('both') };
+  return { count, countWord, scale, color, adjs, determiner, definite, all: ['all', 'every', 'each', 'both'].some((q) => win.includes(q)) };
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -307,6 +310,14 @@ export function findObjects(world, { arch = null, noun = '', color = null } = {}
   return newestFirst(hits);
 }
 
+/** The existing objects an item refers to: all of them for "the trees" / "all" / "every" / "each", two for "both". */
+function targetsOf(world, it) {
+  const f = findObjects(world, it);
+  if (it.determiner === 'both') return f.slice(0, 2);
+  if (it.plural || it.all) return f.slice(0, it.count && it.count > 1 && !it.definite && !it.all ? it.count : 40);
+  return f.slice(0, 1);
+}
+
 function newestBatch(objs) {
   if (!objs.length) return [];
   const sorted = newestFirst(objs);
@@ -450,7 +461,7 @@ const RECIPES = [
 // ---------------------------------------------------------------------------------------------------------------
 // Verbs and small talk
 
-const REMOVE_RE = /\b(remove|delete|get rid of|take away|take out|banish|dismiss|destroy|erase|unsummon|despawn|clear away|lose|vanish|make (it|them|that|those|this|the [a-z]+( [a-z]+)?) (disappear|vanish|go away))\b/;
+const REMOVE_RE = /\b(remove|delete|get rid of|take away|take out|banish|dismiss|destroy|erase|unsummon|despawn|clear away|lose|vanish|make (it|them|that|those|this|((all|every|each|both) (of )?)?(the|those|these) [a-z]+( [a-z]+)?|(all|every|each|both) [a-z]+( [a-z]+)?) (disappear|vanish|go away))\b/;
 const UNDO_RE = /\b(undo|take (it|that) back|never ?mind that|remove (the )?last one)\b|\bremove (the )?last$/;
 const RESIZE_RE = /\b(bigger|larger|huger|smaller|tinier|shrink|enlarge|taller|shorter|scale (it |them )?(up|down)|twice as big|half the size|grow)\b/;
 const MOVE_RE = /\b(move|bring|put|place|send|push|pull|shift|lift|raise|lower|slide|nudge|carry|hang|float|drag|take|set)\b/;
@@ -715,7 +726,7 @@ export function parse(text, world, history = []) {
   });
   if (recipe) {
     const built = recipe.build().slice(0, Math.max(0, room));
-    if (built.length) { ops.push(...built); phrases.push(pick(recipe.say).replace(/\.$/, '')); }
+    if (built.length) { ops.push(...built); phrases.push(lc(pick(recipe.say).replace(/\.$/, ''))); }
     handled = true; special = true;
   } else if (SURPRISE_RE.test(rest)) {
     const arch = pick(ARCHETYPES.filter((a) => a !== 'wisp'));
@@ -751,9 +762,10 @@ export function parse(text, world, history = []) {
       let v = null;
       if (UNDO_RE.test(c)) v = 'undo';
       else if (REMOVE_RE.test(c)) v = 'remove';
-      else if (RESIZE_RE.test(c) && (pron || items.some((i) => i.definite)) && !items.some((i) => ['a', 'an'].includes(i.determiner))) v = 'resize';
-      else if (MOVE_RE.test(c) && (pron || items.some((i) => i.definite && findObjects(liveWorld, i).length))
-        && !items.some((i) => ['a', 'an', 'another', 'some'].includes(i.determiner) || (i.count && !i.definite))) v = 'move';
+      // "the trees", "all the trees", "every tree", "both trees": definite references to things already here
+      else if (RESIZE_RE.test(c) && (pron || items.some((i) => i.definite || i.all)) && !items.some((i) => ['a', 'an'].includes(i.determiner))) v = 'resize';
+      else if (MOVE_RE.test(c) && (pron || items.some((i) => (i.definite || i.all) && findObjects(liveWorld, i).length))
+        && !items.some((i) => ['a', 'an', 'another', 'some'].includes(i.determiner) || (i.count && !i.definite && !i.all))) v = 'move';
       else if (ADD_RE.test(c) || /\b(another|one more|more)\b/.test(c)) v = 'add';
       else if (items.length && verb) v = verb; // "add a crystal and two lanterns": the second clause inherits "add"
       else if (items.length && !pron && !isPureQuestion(c)) v = 'add'; // just "a portal" / "crystals please"
@@ -780,14 +792,14 @@ export function parse(text, world, history = []) {
       if (v === 'resize') {
         special = true;
         const bigger = /\b(bigger|larger|huger|enlarge|taller|scale (it |them )?up|twice as big|grow)\b/.test(c);
-        const targets = pron ? newestFirst(objects).slice(0, 1) : items.flatMap((it) => { const f = findObjects(liveWorld, it); return it.plural || it.all ? f : f.slice(0, 1); });
+        const targets = pron ? newestFirst(objects).slice(0, 1) : items.flatMap((it) => targetsOf(liveWorld, it));
         for (const o of targets) pending.resizes.push({ o, bigger });
         if (!targets.length) pending.notFound.push(items[0]?.arch ? ARCH_INFO[items[0].arch].label : 'that');
         continue;
       }
       if (v === 'move') {
         const targets = pron ? (/\b(them|those|these)\b/.test(c) ? newestBatch(objects) : newestFirst(objects).slice(0, 1))
-          : items.flatMap((it) => { const f = findObjects(liveWorld, it); return it.plural || it.all ? f : f.slice(0, 1); });
+          : items.flatMap((it) => targetsOf(liveWorld, it));
         const dest = moveDestination(c, anchor, where);
         if (!targets.length) { pending.notFound.push(items[0]?.arch ? ARCH_INFO[items[0].arch].label : 'that'); continue; }
         if (!dest) { extra.push(`Where should the ${spokenName(targets[0])} go? Closer, far away, or up in the sky?`); continue; }
@@ -822,12 +834,31 @@ export function parse(text, world, history = []) {
     const label = names.size === 1 ? (one ? `the ${spokenName(uniq[0])}` : `the ${uniq.length > 2 ? numWord(uniq.length) + ' ' : ''}${pluralOf(uniq[0])}`) : `the ${spokenList(uniq).replace(/^(a|an) /, '')}`;
     phrases.push(`${label} ${pick(one ? ['fades away like mist', 'dissolves into sparkles', 'drifts apart into light'] : ['fade away like mist', 'dissolve into sparkles', 'drift apart into light'])}`);
   }
-  for (const { o, bigger } of pending.resizes) {
-    if (objectArchetype(o) || o.asset?.type === 'archetype') {
+  if (pending.resizes.length) {
+    // A resize is a remove + add pair (the add carries `replaces`, so sanitizeOps keeps the pair whole). Only take as
+    // many as fit in the per-turn op budget alongside what is already queued, and say exactly what changed.
+    const removing = new Set(pending.removes.map((o) => o.id));
+    const uniq = [...new Map(pending.resizes.filter(({ o }) => !removing.has(o.id)).map((r) => [r.o.id, r])).values()];
+    const shapeable = uniq.filter(({ o }) => objectArchetype(o) || o.asset?.type === 'archetype');
+    const budget = Math.max(0, Math.floor((MAX_OPS - ops.length) / 2));
+    const done = shapeable.slice(0, budget);
+    for (const { o, bigger } of done) {
       const s = r2(clamp((o.scale || 1) * (bigger ? 1.6 : 0.6), LIMITS.scale[0], LIMITS.scale[1]));
-      ops.push({ type: 'remove', id: o.id }, { type: 'add', name: o.name, description: o.description, position: o.position, rotationY: o.rotationY, scale: s });
-      phrases.push(`the ${spokenName(o)} ${bigger ? pick(['grows', 'swells gently']) : pick(['shrinks', 'draws itself in'])}`);
-    } else extra.push(`I can't reshape the ${spokenName(o)} yet, but I can move it, or make you a new one.`);
+      ops.push({ type: 'remove', id: o.id }, { type: 'add', name: o.name, description: o.description, position: o.position, rotationY: o.rotationY, scale: s, replaces: o.id });
+    }
+    for (const bigger of [true, false]) {
+      const group = done.filter((r) => r.bigger === bigger).map((r) => r.o);
+      if (!group.length) continue;
+      const one = group.length === 1;
+      const names = new Set(group.map(spokenName));
+      const who = one ? `the ${spokenName(group[0])}`
+        : names.size === 1 ? `the ${numWord(group.length)} ${pluralOf(group[0])}` : `the ${spokenList(group).replace(/^(a|an) /, '')}`;
+      const verbs = bigger ? (one ? ['grows', 'swells gently'] : ['grow', 'swell gently']) : (one ? ['shrinks', 'draws itself in'] : ['shrink', 'draw themselves in']);
+      phrases.push(`${who} ${pick(verbs)}`);
+    }
+    if (shapeable.length > done.length) extra.push('That is as many as I can reshape at once, so ask again for the rest.');
+    const odd = uniq.find(({ o }) => !shapeable.some((r) => r.o.id === o.id));
+    if (odd) extra.push(`I can't reshape the ${spokenName(odd.o)} yet, but I can move it, or make you a new one.`);
   }
   if (pending.moves.length) {
     for (const { o, dest, i, n } of pending.moves) {

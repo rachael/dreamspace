@@ -47,7 +47,7 @@ const MAX_REL = 62 * DEG;
 const CATCH_UP = 12 * DEG;
 const RADIUS = 1.1;
 const Y_OFF = -0.1;
-const MIN_DIST = 0.8, MAX_DIST = 1.8;
+const MIN_DIST = 1.03, MAX_DIST = 1.8;          // wisp + bubble stay ≥ 1 m away (incl. float) even if you walk toward it
 const BLINK_DIST = 2.0;
 const THINK_TIMEOUT = 65;
 
@@ -408,6 +408,7 @@ export function createGuide({ scene, THREE, camera } = {}) {
   function setMood(mood) {
     let key = mood && typeof mood === 'object' ? (mood.preset ?? mood.mood) : mood;
     key = String(key ?? '').toLowerCase().trim();
+    if (!key) return;                              // a fog-only / position-only op keeps the current tint
     let hex = MOOD_COLORS[key];
     if (hex == null && key) {
       for (const k in MOOD_COLORS) if (key.includes(k)) { hex = MOOD_COLORS[k]; break; }
@@ -442,7 +443,7 @@ export function createGuide({ scene, THREE, camera } = {}) {
     const relC = clampAngleBand(rel, minRel, MAX_REL);
     if (relC !== rel) yawA = head.yaw + relC;
 
-    const rr = RADIUS - 0.08 * listenLvl;
+    const rr = RADIUS - 0.06 * listenLvl;
     T.set(hp.x - Math.sin(yawA) * rr, hp.y + Y_OFF + 0.02 * listenLvl, hp.z - Math.cos(yawA) * rr);
 
     // appear / teleport: dissolve, jump, re-form

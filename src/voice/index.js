@@ -8,14 +8,18 @@
 //     onState:   (state, detail) => paint(state),// 'idle'|'listening'|'hearing'|'transcribing'|'speaking'|'paused'|'error'
 //     onLevel:   (v) => meter(v),                // optional, 0..1 mic level (whisper provider)
 //     handsFree: true,                           // keep listening after each utterance (default false = one utterance per start)
+//     onError:   (e) => toast(e.message),        // {error, message, recovered?}; 'echo-dropped' (recovered, with .text) = a
+//                                                // transcript was discarded as the guide's own voice, so say so in the UI
+//     ignoreHiddenWhile: () => renderer.xr.isPresenting, // optional: keep the mic when the page reports 'hidden' in VR
 //   });
 //   micButton.onclick = () => voice.start();     // MUST be called from a tap/click (iOS unlocks audio + mic here)
 //   net → onChat: (m) => m.role === 'guide' && voice.speak(m.text);  // listening pauses while it talks
 //
 // Rules (from the voice-web research):
 // - start() does the iOS unlock synchronously, before any await: a silent speechSynthesis.speak() and AudioContext resume.
-// - Recognition/recording pauses while speaking (no self-hearing), resumes ~0.4 s after, and any transcript that just
-//   repeats what the guide said is dropped as an echo.
+// - Recognition/recording pauses while speaking (no self-hearing), resumes ~0.4 s after. A transcript is dropped as an
+//   echo only if it is 4+ words, mostly one in-order stretch of the guide's last line, and (when known) began within
+//   echoTailMs (1.5 s) of that line ending. Short replies ("a crystal", "yes please") always go through.
 // - Providers: 'web-speech' (SpeechRecognition, continuous=false + restart: iOS Safari tab, desktop/Android Chrome) and
 //   'whisper' (MediaRecorder → POST /api/stt, level-based voice detection: Quest, iOS home-screen app, Firefox).
 //   A web-speech service error (Siri off, network) falls back to whisper, and a whisper 503 falls back to web-speech.
@@ -133,6 +137,32 @@ export function echoScore(heard, spoken) {
   return hit / h.length;
 }
 
+/** Longest run of consecutive heard words that appears, in the same order, inside the spoken line. */
+function longestRun(hw, sw) {
+  let best = 0;
+  for (let i = 0; i < hw.length; i++) {
+    for (let j = 0; j < sw.length; j++) {
+      let k = 0;
+      while (i + k < hw.length && j + k < sw.length && hw[i + k] === sw[j + k]) k++;
+      if (k > best) best = k;
+    }
+  }
+  return best;
+}
+
+/** Is `heard` the mic picking up the guide's own line `entry` ({text, endedAt})? Deliberately conservative:
+ *  answers usually reuse the guide's words ("a crystal" after "a crystal or a portal?"), so short replies are never
+ *  echoes, a long in-order stretch of the line must match, and when the speech onset time is known it must fall
+ *  within `tailMs` of the line ending (capture is paused while the guide talks, so real echo can only be reverb). */
+export function isEcho(heard, entry, { onsetAt = null, tailMs = 1500 } = {}) {
+  const hw = words(heard);
+  if (hw.length <= 3 || !entry?.text) return false;
+  const run = longestRun(hw, words(entry.text));
+  if (run < 4 || run < 0.8 * hw.length) return false;
+  if (typeof onsetAt === 'number' && typeof entry.endedAt === 'number' && onsetAt > entry.endedAt + tailMs) return false;
+  return true;
+}
+
 const PREFERRED_VOICES = [/samantha/i, /\bava\b/i, /\bzoe\b/i, /\bevan\b/i, /allison/i, /susan/i, /google us english/i, /\baria\b/i, /jenny/i, /natural/i];
 const NOVELTY_VOICES = /albert|bad news|bahh|bells|boing|bubbles|cellos|good news|jester|organ|superstar|trinoids|whisper|wobble|zarvox|fred|junior|ralph|kathy|grandma|grandpa|rocko|shelley|\bflo\b|eddy|reed|sandy/i;
 
@@ -179,6 +209,7 @@ const MESSAGES = {
   'needs-gesture': 'Tap to let me listen again.',
   'mic-silent': "The microphone isn't sending sound. Tap to retry, or type.",
   unsupported: 'Voice input is not available in this browser. You can type instead.',
+  'echo-dropped': 'I think I heard my own voice there. Say that again?',
 };
 const SWITCH_TO_WHISPER = new Set(['service-not-allowed', 'network', 'language-not-supported']);
 
@@ -192,7 +223,8 @@ export function createVoice(opts = {}) {
     rate: 0.95, pitch: 1.0, volume: 1, voice: null,
     silenceMs: 800, startMs: 120, minSpeechMs: 250, maxUtteranceMs: 15000, noSpeechTimeoutMs: 8000,
     minRms: 0.008, startRatio: 3.0, endRatio: 2.0, recycleMs: 6000,
-    restartDelayMs: 300, tailMs: 400, maxDeferMs: 5000, echoWindowMs: 8000,
+    restartDelayMs: 300, tailMs: 400, maxDeferMs: 5000, echoWindowMs: 8000, echoTailMs: 1500,
+    ignoreHiddenWhile: null,
     releaseMicAfterMs: 30000, releaseMicWhileSpeaking: false,
     ...opts,
   };
@@ -219,7 +251,7 @@ export function createVoice(opts = {}) {
   let ac = null;             // AudioContext (whisper voice detection)
   let ttsUnlocked = false;
   let destroyed = false;
-  const spoken = [];         // [{text, until}] recent guide lines, for echo filtering
+  const spoken = [];         // [{text, endedAt, until}] recent guide lines, for echo filtering
 
   let providerName = cfg.provider === 'auto' || !cfg.provider ? chooseProvider(env) : cfg.provider;
   if (providerName === 'web-speech' && !env.hasSR) providerName = chooseProvider(env);
@@ -319,13 +351,13 @@ export function createVoice(opts = {}) {
   function deliverFinal(raw, meta) {
     const text = cleanTranscript(raw);
     if (!text) return;
-    const now = Date.now();
+    // Compare by when the speech began, not when the text arrived (whisper text lands seconds later, after upload).
+    const at = typeof meta.onsetAt === 'number' ? meta.onsetAt : Date.now();
     for (const s of spoken) {
-      if (now > s.until) continue;
-      const n = words(text).length;
-      const score = echoScore(text, s.text);
-      if ((n >= 3 && score >= 0.85) || (n > 0 && score === 1 && n >= 2)) {
+      if (at > s.until) continue;
+      if (isEcho(text, s, { onsetAt: meta.onsetAt, tailMs: cfg.echoTailMs })) {
         console.debug?.('[voice] dropped echo of the guide:', text);
+        safe(cfg.onError, { error: 'echo-dropped', message: MESSAGES['echo-dropped'], recovered: true, text });
         return;
       }
     }
@@ -521,8 +553,9 @@ export function createVoice(opts = {}) {
   function endSpeaking() {
     ttsBusy = false;
     if (ttsQueue.length) { pumpTts(); return; }
-    const until = Date.now() + cfg.echoWindowMs;
-    for (const t of spokenItemsText) spoken.push({ text: t, until });
+    const endedAt = Date.now();
+    const until = endedAt + cfg.echoWindowMs;
+    for (const t of spokenItemsText) spoken.push({ text: t, endedAt, until });
     spokenItemsText = [];
     while (spoken.length > 8 || (spoken.length && spoken[0].until < Date.now())) spoken.shift();
     speaking = false;
@@ -543,6 +576,10 @@ export function createVoice(opts = {}) {
   function onVisibility() {
     if (!doc || destroyed) return;
     if (doc.visibilityState === 'hidden') {
+      // Some headset browsers report the 2D page as hidden during an immersive session: keep listening there.
+      let keep = false;
+      try { keep = typeof cfg.ignoreHiddenWhile === 'function' && !!cfg.ignoreHiddenWhile(); } catch { /* */ }
+      if (keep) return;
       if (want || listening) {
         paused = 'hidden';
         clearTimeout(listenTimer);
@@ -658,6 +695,7 @@ function createWebSpeechProvider(h) {
   let heard = false;
   let finishing = false;
   let t0 = 0;
+  let onsetAt = null;
 
   function build() {
     rec = new SR(); // one instance for the whole session: a new one per utterance replays the iOS start chime
@@ -666,7 +704,7 @@ function createWebSpeechProvider(h) {
     rec.maxAlternatives = 1;
     rec.lang = cfg.lang;
     rec.onstart = () => h.listening();
-    rec.onspeechstart = () => { heard = true; h.speech(); };
+    rec.onspeechstart = () => { heard = true; onsetAt ??= Date.now(); h.speech(); };
     rec.onresult = (e) => {
       let fin = '';
       let int = '';
@@ -679,6 +717,7 @@ function createWebSpeechProvider(h) {
       interimText = int.trim();
       const shown = (finalText + ' ' + interimText).trim();
       if (shown) {
+        onsetAt ??= Date.now();
         if (!heard) { heard = true; h.speech(); }
         h.interim(shown);
       }
@@ -691,7 +730,7 @@ function createWebSpeechProvider(h) {
       const e = err;
       const early = Date.now() - t0 < 1500;
       discard = false;
-      if (text) h.result(text, { provider: 'web-speech' });
+      if (text) h.result(text, { provider: 'web-speech', onsetAt });
       if (e && e !== 'no-speech' && e !== 'aborted') {
         h.error(e, MESSAGES[e], { fatal: e === 'not-allowed' || e === 'audio-capture', early });
       }
@@ -704,7 +743,7 @@ function createWebSpeechProvider(h) {
     listen() {
       if (active) return;
       if (!rec) build();
-      finalText = ''; interimText = ''; err = null; discard = false; heard = false; finishing = false;
+      finalText = ''; interimText = ''; err = null; discard = false; heard = false; finishing = false; onsetAt = null;
       t0 = Date.now();
       try {
         rec.start();
@@ -894,7 +933,7 @@ function createWhisperProvider(h) {
     // Tap-to-talk released by hand: send it even if the level detector never fired (quiet voice, loud room).
     const manual = reason === 'finish' && !h.handsFree && dur > 400;
     const send = r && reason !== 'abort' && (heardEnough || manual);
-    const meta = { provider: 'whisper', voicedMs: voicedTotal, reason };
+    const meta = { provider: 'whisper', voicedMs: voicedTotal, reason, onsetAt: wasSpeech ? speechAt : null };
     stopCapture();
     if (send) {
       h.transcribing(+1);

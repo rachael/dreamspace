@@ -97,6 +97,11 @@ lets go, dude
 → Vibe mode (see docs/CONTRACT.md): voice → Claude Code writes sandboxed three.js creations → they hot-load in the world.
 Meshy: she's getting a free Pro month **when Meshy reaches out, not before**. Don't sign up; the `meshy` asset provider waits for `MESHY_API_KEY`.
 
+## Voice-swappable looks + hackathon (her words, 2026-09-29)
+"the looks can be swapped depending on what I say to the voice agent running the experience :) we will go through the environment together. The voice agent can narrate and be the one taking the ideas. Orchestrate with the other claude code agent who is building an app for a hackathon right now! It's going to use this as one of the frontend surfaces."
+→ Themes + a narrated guide tour (CONTRACT "Themes"). Keep the HTTP/SSE/MCP API stable for the hackathon app.
+Repo: github.com/rachael/dreamspace (private, SSH).
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.

@@ -1,7 +1,7 @@
 // Dreamspace environment: the calm sci-fi / fantasy world around the user.
 //
 //   import { createEnvironment } from './world/environment.js';
-//   const env = createEnvironment({ scene, room, THREE, renderer });
+//   const env = createEnvironment({ scene, room, THREE, renderer, camera });   // camera optional (sky follows it exactly)
 //   env.setMood({ preset: 'aurora', fog: 0.4, glow: 0.7 });   // partial moods are fine; colours glide over ~4 s
 //   env.update(dt, t);                                          // every frame
 //   env.setAR(true | false);                                    // AR hides everything and clears fog/background
@@ -137,7 +137,13 @@ const GLSL_OUT = /* glsl */`
 const GLSL_DITHER = /* glsl */`
   gl_FragColor.rgb += (envHash12(gl_FragCoord.xy) - 0.5) / 255.0; // hides 8-bit banding in dark gradients
 `;
-// Islands bob slowly; the ground platform (isle 0) never moves.
+// Islands bob slowly; the ground platform (isle 0) never moves. envBobJS mirrors it for the teleport colliders.
+function envBobJS(isle, t) {
+  if (isle < 0.5) return 0;
+  const amp = isle > 5.5 ? 0.22 : 0.14;
+  const x = isle * 0.37;
+  return Math.sin(t * (0.21 + (x - Math.floor(x)) * 0.08) + isle * 1.71) * amp;
+}
 const GLSL_BOB = /* glsl */`
 float envBob(float isle, float t) {
   if (isle < 0.5) return 0.0;
@@ -748,7 +754,7 @@ class TriBuilder {
 // ---------------------------------------------------------------------------------------------------------------
 export function createEnvironment(opts = {}) {
   const THREE = opts.THREE || globalThis.THREE;
-  const { scene, renderer = null } = opts;
+  const { scene, renderer = null, camera = null } = opts;
   if (!THREE) throw new Error('createEnvironment: pass { THREE }');
   if (!scene) throw new Error('createEnvironment: pass { scene }');
   let room = opts.room;
@@ -829,7 +835,8 @@ export function createEnvironment(opts = {}) {
   const sky = addObj(skyGroup, new THREE.Mesh(track(new THREE.SphereGeometry(50, 32, 16)), skyMat), 'env-sky-dome', 50);
   const camWorld = new THREE.Vector3();
   let haveCam = false;
-  sky.onBeforeRender = (_r, _s, cam) => { camWorld.setFromMatrixPosition(cam.matrixWorld); haveCam = true; };
+  // fallback when no `camera` option: remember the last camera that drew the sky (one frame behind)
+  sky.onBeforeRender = (_r, _s, cam) => { if (!camera) { camWorld.setFromMatrixPosition(cam.matrixWorld); haveCam = true; } };
 
   // ================= STARS =================
   {
@@ -1118,6 +1125,7 @@ export function createEnvironment(opts = {}) {
   glowSlots.push({ pos: [0, 0.3, 0], radius: 3.2, kind: 'rune', strength: 0.3 });
 
   const teleportTargets = [];
+  const islandColliders = []; // { col, isle, baseY }: moved each frame by the same bob as the island shader
   const colliderMat = track(new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide }));
   let rockIsle = 6;
 
@@ -1139,7 +1147,6 @@ export function createEnvironment(opts = {}) {
     col.rotation.x = -Math.PI / 2;
     col.userData = { teleport: true, kind: 'ground' };
     addObj(root, col, 'env-ground-collider');
-    col.visible = false;
     teleportTargets.push(col);
   }
 
@@ -1184,7 +1191,9 @@ export function createEnvironment(opts = {}) {
     col.position.set(isl.c[0], isl.c[1], isl.c[2]);
     col.userData = { teleport: true, kind: 'island', index: i };
     addObj(root, col, `env-island-collider-${i}`);
-    col.visible = false;
+    // col stays visible=true so teleport.js (traverseVisible / visibleChain) accepts it; colliderMat has
+    // material.visible=false, so it is never drawn. In AR root.visible=false still rules it out.
+    islandColliders.push({ col, isle, baseY: isl.c[1] });
     teleportTargets.push(col);
   });
 
@@ -1339,7 +1348,17 @@ export function createEnvironment(opts = {}) {
     if (!(vh > 0)) vh = 1000;
     U.uViewH.value = vh; U.uPx.value = vh / 1000;
 
-    // sky layers follow the viewer (one frame behind; invisible at 45-60 m)
+    // islands bob in the shader; keep their teleport colliders on the visible surface (mirrors GLSL envBob)
+    for (const c of islandColliders) c.col.position.y = c.baseY + envBobJS(c.isle, time);
+
+    // sky layers follow the viewer. With opts.camera this is the current frame's position (so a teleport jump
+    // doesn't drag the planet/aurora for a frame, and other passes like portals can't move it);
+    // otherwise it is the camera that last drew the sky (one frame behind).
+    if (camera) {
+      camera.updateWorldMatrix(true, false);
+      camWorld.setFromMatrixPosition(camera.matrixWorld);
+      haveCam = true;
+    }
     if (haveCam) {
       tmpV.copy(camWorld);
       root.updateWorldMatrix(true, false);
