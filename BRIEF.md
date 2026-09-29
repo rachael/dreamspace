@@ -109,6 +109,11 @@ Hardware at the demo: the Plaud mic and a magnetic phone backer are connected wh
 Clarification (her words): "it can be claude app hands free agent it doesnt have to be tho if it's not connected and contextlog is still used, claude app hands free will know what happened w lumen in its absence / but claude can come in / use the app too"
 → Solo Lumen, or Claude joins through MCP. Contextlog is written (outbound) so the Claude app knows what happened with Lumen. See CONTRACT "Presence and handoff".
 
+## Lumen's voice (her words, 2026-09-29): find it and make it permanent
+"it was calm and great and a voice ive always wanted" … "sounded almost like a child's voice" … "clear and had the echo and delay effect and sounded COMPLETELY different than samantha"
+- It was heard once during the build and never identified. It's NOT: Samantha (plain or with echo), Flo, Sandy, Shelley, Karen, Moira, Tessa, Eddy, or Chrome's "Google US English".
+- Best lead: the iPhone phone page (iOS speechSynthesis → an iOS/Siri-quality voice), possibly heard through the spatial echo chain. Next step: on her iPhone, list `speechSynthesis.getVoices()` and play the candidates for her to pick. Then pin that voice for Lumen on every surface, and never auto-switch voices again.
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
