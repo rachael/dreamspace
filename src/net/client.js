@@ -22,8 +22,9 @@
 // to EventSource where streaming fetch is missing, and switches transport by itself if one of them stalls.
 // Third transport, short polling: some tunnels (Cloudflare quick tunnels) send the SSE headers but hold the whole body
 // back, so neither streaming transport ever sees a byte. After two stalls the client polls instead:
-//   GET /api/events/poll?from=<cursor>&client=<phone|xr|desktop>   (cursor = last SSE `id:` seen; omitted the first time)
-//   → {cursor, events:[{id, event, data}], reset?}  (also accepts a bare array; `type`/`name` for `event`; `last`/`lastId`/`next` for `cursor`)
+//   GET /api/events/poll?from=<last id>&wait=15000&client=<phone|xr|desktop>   (CONTRACT.md; `from` empty the first time)
+//   → {events:[{id, event, data}], last}, or {snapshot, status, last} when `from` is missing/too old/from before a restart.
+// With `wait` the server holds an empty answer until the next broadcast (long poll), so updates arrive at once.
 // Every returned event goes through the same dispatch() as SSE. If that endpoint isn't there (anything but 2xx JSON),
 // it polls GET /api/world instead, which keeps objects and mood in sync (not chat/status/creation). Both the SSE stream
 // and the poll endpoint are retried in the background every 60 s; a working stream switches back to SSE.
@@ -584,19 +585,23 @@ export function connect(opts = {}) {
   async function pollOnce(myGen) {
     if (myGen !== gen || closed || !pollMode) return;
     let fetchedWorld = false;
-    if (!world || needSnapshot) {
+    const t0 = now();
+    let got = 0;
+    if (needSnapshot || (!world && pollEndpoint === 'world')) {
       if (await fetchWorld(myGen) !== 'ok') return;
       needSnapshot = false;
       fetchedWorld = true;
     }
     if (pollEndpoint !== 'world') {
-      const q = `from=${encodeURIComponent(pollCursor ?? '')}&client=${encodeURIComponent(fromValue())}`;
-      const r = await apiRequest('GET', `/api/events/poll?${q}`, { base, timeout: 10000, retries: 0 });
+      // Long-poll only once the endpoint is known and the page is visible (a hidden tab just checks in now and then).
+      const wait = pollEndpoint === 'events' && doc?.visibilityState !== 'hidden' ? 15000 : 0;
+      const q = `from=${encodeURIComponent(pollCursor ?? '')}${wait ? `&wait=${wait}` : ''}&client=${encodeURIComponent(fromValue())}`;
+      const r = await apiRequest('GET', `/api/events/poll?${q}`, { base, timeout: wait + 10000, retries: 0 });
       if (myGen !== gen || closed) return;
       if (r.status === 401 || r.status === 403) { authFailed(); return; }
       if (r.ok && (isObj(r.data) || Array.isArray(r.data))) {
         pollEndpoint = 'events';
-        takePoll(r.data, myGen);
+        got = takePoll(r.data, myGen);
         if (myGen !== gen || closed) return;
       } else if (r.status === 0 || RETRYABLE.has(r.status) || (pollEndpoint === 'events' && r.status >= 500)) {
         failed(myGen, `poll: ${r.error}`);
@@ -615,13 +620,25 @@ export function connect(opts = {}) {
     lastActivity = now();
     setState('open');
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(() => pollOnce(myGen), pollDelay());
+    // After a held (long-poll) answer or a batch of events, ask again right away; otherwise wait pollMs.
+    const quick = pollEndpoint === 'events' && doc?.visibilityState !== 'hidden' && (got > 0 || now() - t0 > 1000);
+    pollTimer = setTimeout(() => pollOnce(myGen), quick ? 50 : pollDelay());
   }
 
   // Feed one /api/events/poll answer into dispatch(), deduplicated by event id.
+  // Returns how many events were applied.
   function takePoll(body, myGen) {
+    const next = Array.isArray(body) ? undefined : (body.last ?? body.cursor ?? body.lastId ?? body.next);
+    if (!Array.isArray(body) && isObj(body.snapshot)) {
+      // Fresh start (no cursor, cursor too old, or the server restarted): the snapshot and `last` are one consistent pair.
+      needSnapshot = false;
+      dispatch('snapshot', body.snapshot, myGen);
+      if (myGen !== gen || closed) return 0;
+      if (isObj(body.status)) dispatch('status', body.status, myGen);
+      if (next !== undefined && next !== null) { pollCursor = next; lastEventId = String(next); }
+      return 1;
+    }
     const list = (Array.isArray(body) ? body : Array.isArray(body.events) ? body.events : []).filter(isObj);
-    const next = Array.isArray(body) ? undefined : (body.cursor ?? body.last ?? body.lastId ?? body.next);
     const prev = pollCursor;
     const restarted = (!Array.isArray(body) && body.reset === true)
       || (Number.isFinite(num(next)) && Number.isFinite(num(prev)) && num(next) < num(prev)); // server restarted: ids start over
@@ -635,17 +652,20 @@ export function connect(opts = {}) {
       else needSnapshot = true;
     }
     let lastId = null;
+    let applied = 0;
     for (const ev of events) {
       const id = ev.id;
       if (id !== undefined && id !== null) lastId = id;
       if (prev !== null && !restarted && Number.isFinite(num(id)) && Number.isFinite(num(prev)) && num(id) <= num(prev)) continue;
       const name = ev.event ?? ev.type ?? ev.name ?? 'message';
       dispatch(name, 'data' in ev ? ev.data : ev, myGen);
-      if (myGen !== gen || closed) return;
+      applied++;
+      if (myGen !== gen || closed) return applied;
     }
     if (lastId === null && list.length) { const l = list[list.length - 1].id; if (l !== undefined && l !== null) lastId = l; }
     const cursor = next ?? lastId;
     if (cursor !== undefined && cursor !== null) { pollCursor = cursor; lastEventId = String(cursor); }
+    return applied;
   }
 
   // Every sseRetryMs while polling: see whether the stream gets through now; also re-ask for the poll endpoint.

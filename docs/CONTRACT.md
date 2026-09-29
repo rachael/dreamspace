@@ -188,3 +188,10 @@ Every tool description opens with *when to use it* in one clause, written for a 
 6. `propose_creation {description}`: the **default for anything that needs new code**. It POSTs to contextlog ideas (`source:'rae', surface:'spatial'`) and returns `say:"Logged that as an idea."`.
    `vibe {description}` stays as a separate, explicit instant vibe-code tool for the demo.
 7. Also: `remove`, `clear_world` (confirm-style `say`).
+
+### Presence and handoff (her clarification, 2026-09-29)
+"it can be claude app hands free agent it doesnt have to be tho if it's not connected and contextlog is still used, claude app hands free will know what happened w lumen in its absence / but claude can come in / use the app too"
+- **Two modes, both first-class.** (1) Solo: Lumen runs on the local brains (ollama, claude CLI or scripted). (2) Claude joins: the Claude app (hands-free) drives through MCP whenever it's connected, alongside Lumen, and can come and go at any time.
+- **Contextlog is the memory bridge (outbound only).** While the Claude app is absent, Dreamspace posts sparse, **meaningful** ambient summaries of what happened with Lumen (what she said and asked, worlds and moods visited, things summoned, ideas logged) to `/api/{token}/ambient` (`source:'dreamspace'`, tags `['world-event','lumen-session']`), batched at most every ~3 min plus once at session end or idle. That way the Claude app knows what happened with Lumen in its absence. Dreamspace itself still never reads contextlog.
+- **Presence:** any MCP call marks `claudePresent` for 90 s (refreshed on each call). The server broadcasts SSE `presence {claude: bool}`. When Claude arrives, Lumen says one short line ("Claude's here with us") and stops auto-replying to utterances that are addressed to Claude. Clients show a small presence chip.
+- **Catch-up for Claude on arrival:** `look_around.detail.recent` holds the last ~8 session events (chat lines, ops, ideas) as short text, so Claude can pick up mid-session even before contextlog syncs.

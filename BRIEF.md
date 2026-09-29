@@ -106,6 +106,9 @@ Correction (her words): "no it doesnt this is separate like a game and agent is 
 Hardware at the demo: the Plaud mic and a magnetic phone backer are connected when available (they feed the Claude app/other session, not Dreamspace directly).
 → No while-away greeting and no context pull. The Claude app (hands-free) is the agent, via the MCP connector.
 
+Clarification (her words): "it can be claude app hands free agent it doesnt have to be tho if it's not connected and contextlog is still used, claude app hands free will know what happened w lumen in its absence / but claude can come in / use the app too"
+→ Solo Lumen, or Claude joins through MCP. Contextlog is written (outbound) so the Claude app knows what happened with Lumen. See CONTRACT "Presence and handoff".
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
