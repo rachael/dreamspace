@@ -112,7 +112,8 @@ Clarification (her words): "it can be claude app hands free agent it doesnt have
 ## Lumen's voice (her words, 2026-09-29): find it and make it permanent
 "it was calm and great and a voice ive always wanted" … "sounded almost like a child's voice" … "clear and had the echo and delay effect and sounded COMPLETELY different than samantha"
 - It was heard once during the build and never identified. It's NOT: Samantha (plain or with echo), Flo, Sandy, Shelley, Karen, Moira, Tessa, Eddy, or Chrome's "Google US English".
-- Best lead: the iPhone phone page (iOS speechSynthesis → an iOS/Siri-quality voice), possibly heard through the spatial echo chain. Next step: on her iPhone, list `speechSynthesis.getVoices()` and play the candidates for her to pick. Then pin that voice for Lumen on every surface, and never auto-switch voices again.
+- **Update (her words):** "it was the voice i heard in the creative app i saw someone demo like 2 weeks ago". The target voice is from that app, not from Dreamspace; Dreamspace only ever used built-in Mac/Chrome voices. Next: identify the app → its TTS provider/voice (ElevenLabs? OpenAI? Hume? Sesame?) → wire it in as a Lumen voice provider (free tier if possible; her rule: subscription or free, no paid API without asking). Also: show the active voice name on screen so a loved voice can never be lost again.
+- Earlier lead (superseded): the iPhone phone page (iOS speechSynthesis → an iOS/Siri-quality voice), possibly heard through the spatial echo chain. Next step: on her iPhone, list `speechSynthesis.getVoices()` and play the candidates for her to pick. Then pin that voice for Lumen on every surface, and never auto-switch voices again.
 
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
