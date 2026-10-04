@@ -1,0 +1,8 @@
+# public-guard.py (AI-OS code-security): findings reviewed 2026-10-04 and fine to publish.
+# Each line is a regex matched against "path:category".
+# The demo-safety guardrail names the topics it refuses to raise, and its smoke test sends one on purpose.
+^server/brains/persona\.mjs:(health|benefits)$
+^server/brains/index\.mjs:(health|benefits)$
+^server/mcp/world-tools\.mjs:(health|benefits)$
+^server/smoke\.mjs:(health|benefits)$
+^docs/CONTRACT\.md:(health|benefits)$
