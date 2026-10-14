@@ -113,6 +113,11 @@ Clarification (her words): "it can be claude app hands free agent it doesnt have
 "you can orchestrate with codex — codex can and will create the visual scenes. in-game agent can narrate what it wants at codex; codex creates a visual scene; opus 5.5 can use it for spatial development"
 → Pipeline: the in-game agent (Lumen) narrates a scene request → Codex builds the visual scene → Opus 5.5 integrates it into the spatial world. Not built yet.
 
+## Bridged Claude takes over narration (her words, 2026-10-14)
+"bridged claude also has narration ability. if claude is in the world, lumen makes way, and claude takes over. lumen can support claude; if it is a claude who does not understand what to do, lumen can teach it, but this happens behind the scenes"
+"you can also design some elevenlabs voice effects for depth for the claude who bridges in"
+→ Claude present: Lumen yields the voice and narration; Claude narrates in its own voice (ElevenLabs + a depth effect chain). Lumen supports, and coaches a confused Claude silently (tool results, briefings), never aloud.
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
