@@ -109,6 +109,10 @@ Hardware at the demo: the Plaud mic and a magnetic phone backer are connected wh
 Clarification (her words): "it can be claude app hands free agent it doesnt have to be tho if it's not connected and contextlog is still used, claude app hands free will know what happened w lumen in its absence / but claude can come in / use the app too"
 → Solo Lumen, or Claude joins through MCP. Contextlog is written (outbound) so the Claude app knows what happened with Lumen. See CONTRACT "Presence and handoff".
 
+## Codex for visual scenes (her words, 2026-10-14)
+"you can orchestrate with codex — codex can and will create the visual scenes. in-game agent can narrate what it wants at codex; codex creates a visual scene; opus 5.5 can use it for spatial development"
+→ Pipeline: the in-game agent (Lumen) narrates a scene request → Codex builds the visual scene → Opus 5.5 integrates it into the spatial world. Not built yet.
+
 ## Lessons so far
 - Start from the site's own starter prompt / the owner's metaprompt. Don't explore the whole workshop first.
 - Ask about the device up front (Quest 3, not PICO). That decides WebXR vs WebSpatial and whether any emulator is needed.
